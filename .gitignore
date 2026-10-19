@@ -2,3 +2,4 @@ frontend/.build/
 frontend/.swiftpm/
 # local reference captures, not shipped
 oracle/
+build/

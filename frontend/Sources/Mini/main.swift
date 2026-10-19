@@ -9,6 +9,10 @@ typealias KeyEvent = Android_Emulation_Control_KeyboardEvent
 let avd = CommandLine.arguments.dropFirst().first ?? "goldfish37"
 let grpcPort = 8554
 let sdk = ProcessInfo.processInfo.environment["ANDROID_HOME"] ?? NSHomeDirectory() + "/Library/Android/sdk"
+/// Emulator bundled into Mini.app by scripts/bundle.sh, else the SDK's own install.
+let emulatorDir = Bundle.main.resourceURL.map { $0.path + "/emulator" }.flatMap {
+  FileManager.default.isExecutableFile(atPath: $0 + "/emulator") ? $0 : nil
+} ?? sdk + "/emulator"
 
 /// File the emulator writes RGBA frames into (ImageTransport.MMAP); we map the same file.
 final class FrameBuffer: @unchecked Sendable {
@@ -127,8 +131,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
   var quitting = false
 
   func applicationDidFinishLaunching(_ note: Notification) {
-    emulator.executableURL = URL(fileURLWithPath: sdk + "/emulator/emulator")
-    emulator.arguments = ["-avd", avd, "-no-window", "-gpu", "host", "-grpc", "\(grpcPort)", "-grpc-use-token", "-no-boot-anim"]
+    emulator.executableURL = URL(fileURLWithPath: emulatorDir + "/emulator")
+    // The bundled emulator lives outside the SDK; it still needs the SDK for system images.
+    emulator.environment = ProcessInfo.processInfo.environment.merging(["ANDROID_SDK_ROOT": sdk]) { _, new in new }
+    // GuestUsesAngle: guest GLES runs on ANGLE over gfxstream Vulkan, which renders on MoltenVK.
+    emulator.arguments = [
+      "-avd", avd, "-no-window", "-gpu", "host", "-feature", "GuestUsesAngle",
+      "-grpc", "\(grpcPort)", "-grpc-use-token", "-no-boot-anim",
+    ]
     emulator.terminationHandler = { _ in DispatchQueue.main.async { NSApp.terminate(nil) } }
     do { try emulator.run() } catch { fatal("cannot launch emulator: \(error)") }
 
