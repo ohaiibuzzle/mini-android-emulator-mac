@@ -251,6 +251,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
       let profile = URL(fileURLWithPath: (Prefs.configPath(avd: avd) as NSString).deletingLastPathComponent)
         .appendingPathComponent("modem_simulator/iccprofile_for_sim0.xml")
       Task.detached { try? await Modem.run(socket: socketPath + ".modem", profile: profile) }
+      Task.detached { try? await Bluetooth.run(socket: socketPath + ".bluetooth") }
     } else {
       fb = nil
       launchEmulator()

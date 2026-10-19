@@ -29,6 +29,11 @@ Requires `protoc` (`brew install protobuf`) and Xcode at build time. CI (`.githu
 - `qemu/0003`: `mini-display`. It copies frames, rotated, into a double-buffered shared file that Mini maps, and takes touch, key and rotation messages over a socket.
 - `rutabaga_gfx/0001`: the display size in rutabaga's C interface.
 
+Mini also answers the guest's Bluetooth itself: `bt_vhci_forwarder` bridges `/dev/vhci` to a virtio-console port, and
+`frontend/Sources/Mini/Bluetooth.swift` plays a dummy HCI controller on the host end. With nothing there, the kernel's
+HCI setup never finishes, `hci0` stays hidden from mgmt and Android's Bluetooth HAL spins a core; with it, Bluetooth
+switches on (Classic only, no LE) and idles.
+
 The guest uses ANGLE on gfxstream Vulkan over virtio-gpu, with minigbm gralloc. Mini writes the bootconfig itself (`<avd>.avd/initrd-mini`). After boot it registers the guest with adb as `emulator-5554` and, through `adb root`, wraps eth0 in the guest's `virt_wifi` driver. That driver shows QEMU's user network to Android as the "VirtWifi" access point, since the image only routes through Wi-Fi. A new device on QEMU gets an ext4 data disk made with `mke2fs` (`brew install e2fsprogs`). Quitting runs `svc power shutdown`, so /data unmounts cleanly.
 
 **The AVD needs `hw.keyboard=yes`** in `~/.android/avd/<name>.avd/config.ini`, otherwise the guest has no keyboard device and keys are dropped. `avdmanager` defaults it to `no`.

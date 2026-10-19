@@ -153,6 +153,9 @@ enum Qemu {
       "-device", "virtio-serial-pci", "-device", "virtconsole,chardev=hvc0", "-device", "virtconsole,chardev=hvc1",
       // Port 2 of virtio-serial, which the guest numbers vport7 after the seven virtio-mmio devices above.
       "-chardev", "socket,id=modem,path=\(socket).modem,server=on,wait=off", "-device", "virtserialport,chardev=modem,name=modem",
+      // Port 3: the other end of the guest's bt_vhci_forwarder, answered by Bluetooth.run.
+      "-chardev", "socket,id=bluetooth,path=\(socket).bluetooth,server=on,wait=off",
+      "-device", "virtserialport,chardev=bluetooth,name=bluetooth",
       "-device", "virtio-keyboard-pci", "-device", "virtio-multitouch-pci",
       // One output and one input stream; the ranchu audio HAL drives them through virtio_snd.
       "-audiodev", "coreaudio,id=snd", "-device", "virtio-sound-pci,audiodev=snd",
@@ -162,7 +165,7 @@ enum Qemu {
       "-chardev", "socket,id=adb,host=127.0.0.1,port=\(adbPort),server=on,wait=off",
       // sensors=1: the accelerometer, which mini-display tilts when Mini rotates.
       "-device", "android-vsock-pci,guest-cid=3,adb=adb,sensors=1,boot-props=qemu.sf.lcd_density=\(config.size.density);qemu.hw.mainkeys=0;"
-        + "vendor.qemu.vport.modem=/dev/vport7p2",
+        + "vendor.qemu.vport.modem=/dev/vport7p2;vendor.qemu.vport.bluetooth=/dev/vport7p3",
       "-chardev", "socket,id=mini,path=\(socket),server=on,wait=off",
       "-object", "mini-display,id=display,chardev=mini,shm=\(shm)",
     ]
