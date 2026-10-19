@@ -4,3 +4,4 @@ frontend/.swiftpm/
 oracle/
 build/
 .DS_Store
+bench/out/
