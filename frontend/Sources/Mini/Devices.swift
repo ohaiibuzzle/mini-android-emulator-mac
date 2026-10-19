@@ -30,6 +30,7 @@ struct SystemImage: Hashable, Identifiable {
 /// The part of a device's config.ini that Mini edits, in the emulator's keys.
 struct DeviceConfig: Equatable {
   var size = DisplaySize()
+  var cores = 4
   var ramMB = 2048
   var storageMB = 6144  // userdata; a new size only applies to a freshly made data disk
   var freeform = false
@@ -44,6 +45,7 @@ struct DeviceConfig: Equatable {
   init(_ ini: [String: String]) {
     let lcd = ["hw.lcd.width", "hw.lcd.height", "hw.lcd.density"].map { ini[$0].flatMap(Int.init) }
     if let w = lcd[0], let h = lcd[1], let d = lcd[2] { size = DisplaySize(width: w, height: h, density: d) }
+    cores = ini["hw.cpu.ncore"].flatMap(Int.init) ?? cores
     ramMB = ini["hw.ramSize"].flatMap { Self.megabytes($0) } ?? ramMB
     storageMB = ini["disk.dataPartition.size"].flatMap { Self.megabytes($0, bare: 1) } ?? storageMB
     freeform = ini["display.settings.xml"] == "freeform"
@@ -62,12 +64,15 @@ struct DeviceConfig: Equatable {
   }
 
   /// Within what the guest boots with.
-  var valid: Bool { size.valid && (1024...65536).contains(ramMB) && (2048...1 << 20).contains(storageMB) }
+  var valid: Bool {
+    size.valid && (1...Self.maxCores).contains(cores) && (1024...65536).contains(ramMB) && (2048...1 << 20).contains(storageMB)
+  }
+  static let maxCores = ProcessInfo.processInfo.activeProcessorCount  // HVF runs one host thread per vCPU
 
   var values: [String: String?] {
     [
       "hw.lcd.width": "\(size.width)", "hw.lcd.height": "\(size.height)", "hw.lcd.density": "\(size.density)",
-      "hw.ramSize": "\(ramMB)M", "disk.dataPartition.size": "\(storageMB)M",
+      "hw.cpu.ncore": "\(cores)", "hw.ramSize": "\(ramMB)M", "disk.dataPartition.size": "\(storageMB)M",
       // Becomes androidboot.qemu.display.settings.xml; Google's provisioning app enables desktop windows.
       "display.settings.xml": freeform ? "freeform" : nil,
       "hw.lcd.vsync": "\(refreshHz)",  // the guest display's only mode; Mini lifts Android's 60 Hz default cap after boot
@@ -102,7 +107,7 @@ enum Devices {
     try fm.createDirectory(atPath: dir, withIntermediateDirectories: true)
     var c = config
     c.sysdir = image.sysdir
-    let base: [String: String?] = ["hw.cpu.ncore": "4", "image.sysdir.1": image.sysdir]
+    let base: [String: String?] = ["image.sysdir.1": image.sysdir]
     try Prefs.ini("", setting: base.merging(c.values) { _, new in new })
       .write(toFile: "\(dir)/config.ini", atomically: true, encoding: .utf8)
   }
@@ -255,6 +260,7 @@ struct DevicesView: View {
         Text("\(config.size.width * 160 / max(config.size.density, 1)) dp wide").font(.caption).foregroundStyle(.secondary)
       }
       Section("Hardware") {
+        Stepper("CPU cores: \(config.cores)", value: $config.cores, in: 1...DeviceConfig.maxCores)
         TextField("Memory (MB)", value: $config.ramMB, format: .number.grouping(.never))
         TextField("Storage (MB)", value: $config.storageMB, format: .number.grouping(.never))
         Text("Memory 1024–65536 MB, storage at least 2048 MB. Changing storage erases the device's data.")
@@ -379,6 +385,7 @@ struct NewDeviceView: View {
       .onChange(of: config.size) { config.freeform = config.size == DisplaySize.presets[2].1 }
       Toggle("Desktop windowing (freeform)", isOn: $config.freeform)
       GLESPicker(hostGLES: $config.hostGLES)
+      Stepper("CPU cores: \(config.cores)", value: $config.cores, in: 1...DeviceConfig.maxCores)
       TextField("Memory (MB)", value: $config.ramMB, format: .number.grouping(.never))
       TextField("Storage (MB)", value: $config.storageMB, format: .number.grouping(.never))
       if let error { Text(error).font(.caption).foregroundStyle(.red).textSelection(.enabled) }

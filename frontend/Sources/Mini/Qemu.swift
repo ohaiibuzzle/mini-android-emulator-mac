@@ -146,7 +146,7 @@ enum Qemu {
       .write(to: URL(fileURLWithPath: initrd))
 
     var args = [
-      "-M", "virt", "-accel", "hvf", "-cpu", "host", "-smp", ini["hw.cpu.ncore"] ?? "4", "-m", "\(config.ramMB)",
+      "-M", "virt", "-accel", "hvf", "-cpu", "host", "-smp", "\(config.cores)", "-m", "\(config.ramMB)",
       "-nodefaults", "-display", "none", "-kernel", sysdir + "kernel-ranchu", "-initrd", initrd,
       "-append", "console=ttyAMA0 earlycon keep_bootcon printk.devkmsg=on bootconfig loop.max_part=7 cgroup_disable=pressure "
         + "stack_depot_disable=on kasan.stacktrace=off mac80211_hwsim.radios=0 ndns=2",
