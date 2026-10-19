@@ -4,7 +4,7 @@ import SwiftUI
 
 /// A pinned zip from Google's SDK repository. Its license forbids bundling, so Mini shows the terms and downloads it.
 struct SDKDownload: Sendable {
-  let title: String  // "Android Emulator 37.3.4"
+  let title: String  // "Android SDK Platform-Tools 37.0.1"
   let blurb: String  // why and where, shown above the license
   let zipURL: URL
   let sha1: String
@@ -43,7 +43,7 @@ struct SDKDownload: Sendable {
       task.resume()
     }
 
-    let actual = try EmulatorSetup.sha1(of: zip)
+    let actual = try Self.sha1(of: zip)
     guard actual == sha1 else { throw SetupError("checksum mismatch: got \(actual), expected \(sha1)") }
 
     try? fm.removeItem(at: staging)
@@ -56,44 +56,6 @@ struct SDKDownload: Sendable {
     try? fm.removeItem(at: dest)
     try fm.moveItem(at: top[0], to: dest)
   }
-}
-
-/// Mini's own copy of the Android Emulator, downloaded from Google on first run.
-enum EmulatorSetup {
-  // Canary: unlike stable 37.2.x, its gfxstream passes VK_EXT_provoking_vertex through, which guest ANGLE needs for ES 3.x.
-  static let version = "37.3.4"
-  static let root = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-    .appendingPathComponent("Mini")
-  static let dir = root.path + "/emulator"
-  static let download = SDKDownload(
-    title: "Android Emulator \(version)",
-    blurb: "Google's license doesn't allow bundling the emulator, so Mini downloads it (about 420 MB) from Google into ~/Library/Application Support/Mini. Downloading means accepting these terms:",
-    zipURL: URL(string: "https://dl.google.com/android/repository/emulator-darwin_aarch64-16555280.zip")!,
-    sha1: "4cd3b6f14336a0085b8992eeffe637864839b4ce",
-    repoURL: URL(string: "https://dl.google.com/android/repository/repository2-3.xml")!,
-    licenseID: "android-sdk-preview-license")  // what repository2-3.xml lists for this package
-
-  /// True when the pinned version is unpacked; a pin bump makes Mini offer the download again.
-  static var installed: Bool {
-    let props = try? String(contentsOfFile: dir + "/source.properties", encoding: .utf8)
-    return props?.contains("Pkg.Revision=\(version)\n") == true
-      && FileManager.default.isExecutableFile(atPath: dir + "/emulator")
-  }
-
-  /// Downloads into `progress`, verifies, unpacks, and swaps in Mini's MoltenVK.
-  static func install(progress: @escaping @MainActor (Progress) -> Void) async throws {
-    try await download.install(to: URL(fileURLWithPath: dir), progress: progress) { unpacked in
-      // Google's MoltenVK 1.4.0 lacks VK_EXT_provoking_vertex; ours is built with MVK_USE_METAL_PRIVATE_API (scripts/bundle.sh).
-      if let mvk = Bundle.main.url(forResource: "libMoltenVK", withExtension: "dylib") {
-        let target = unpacked.appendingPathComponent("lib64/vulkan/libMoltenVK.dylib")
-        try FileManager.default.removeItem(at: target)
-        try FileManager.default.copyItem(at: mvk, to: target)
-      } else {
-        // shortcut: `swift run` has no app bundle, so it keeps Google's MoltenVK (guest ANGLE stays ES 2.0); use bundle.sh for ES 3.1.
-        FileHandle.standardError.write(Data("Mini: no bundled libMoltenVK.dylib; keeping the emulator's own\n".utf8))
-      }
-    }
-  }
 
   static func sha1(of url: URL) throws -> String {
     let h = try FileHandle(forReadingFrom: url)
@@ -104,13 +66,31 @@ enum EmulatorSetup {
   }
 }
 
+/// Google's adb, which Mini drives the guest with (GuestSetup). Same license as the emulator: downloaded, never bundled.
+enum PlatformTools {
+  static var dir: String { Prefs.home + "/platform-tools" }
+  static let download = SDKDownload(
+    title: "Android SDK Platform-Tools 37.0.1",
+    blurb: "Mini talks to Android through Google's adb, and Google's license doesn't allow bundling it, so Mini downloads platform-tools (about 16 MB) from Google into ~/Library/Application Support/Mini. Downloading means accepting these terms:",
+    zipURL: URL(string: "https://dl.google.com/android/repository/platform-tools_r37.0.1-darwin.zip")!,
+    sha1: "6ae73f4de6452dc57e62ec02b68eed92a4c21661",
+    repoURL: URL(string: "https://dl.google.com/android/repository/repository2-3.xml")!,
+    licenseID: "android-sdk-license")  // what repository2-3.xml lists for this package
+
+  static var installed: Bool { FileManager.default.isExecutableFile(atPath: dir + "/adb") }
+
+  static func install(progress: @escaping @MainActor (Progress) -> Void) async throws {
+    try await download.install(to: URL(fileURLWithPath: dir), progress: progress)
+  }
+}
+
 /// Google's stock API 37 image: what new devices boot by default and what Import GSI borrows kernel and vendor from.
 enum BaseImage {
   static let sysdir = "system-images/android-37.0/google_apis/arm64-v8a/"
-  static var dir: String { Prefs.sdk + "/" + sysdir }
+  static var dir: String { Prefs.home + "/" + sysdir }
   static let download = SDKDownload(
     title: "Google APIs system image (Android 17, API 37)",
-    blurb: "New devices and imported GSIs boot on Google's stock image: its kernel, vendor and ramdisk. Mini downloads it (about 2.2 GB, 6 GB unpacked) from Google into your Android SDK's system-images, where sdkmanager would put it. Downloading means accepting these terms:",
+    blurb: "New devices and imported GSIs boot on Google's stock image: its kernel, vendor and ramdisk. Mini downloads it (about 2.2 GB, 6 GB unpacked) from Google into ~/Library/Application Support/Mini. Downloading means accepting these terms:",
     zipURL: URL(string: "https://dl.google.com/android/repository/sys-img/google_apis/arm64-v8a-37.0_r06.zip")!,
     sha1: "e007fb23024c59bffdf944b95c61143bc38101ce",
     repoURL: URL(string: "https://dl.google.com/android/repository/sys-img/google_apis/sys-img2-4.xml")!,
@@ -121,7 +101,6 @@ enum BaseImage {
   }
 
   static func install(progress: @escaping @MainActor (Progress) -> Void) async throws {
-    // shortcut: no package.xml, so sdkmanager lists it as unknown; write one if Android Studio interop matters.
     try await download.install(to: URL(fileURLWithPath: dir), progress: progress)
   }
 }
@@ -193,9 +172,9 @@ struct SetupView: View {
 enum SetupWindow {
   private static var window: NSWindow?
 
-  /// First-run emulator download. No close box: Quit or finish, never a windowless app.
+  /// First-run platform-tools download. No close box: Quit or finish, never a windowless app.
   static func show(done: @escaping () -> Void) {
-    present(EmulatorSetup.download, install: EmulatorSetup.install, cancelTitle: "Quit", cancel: { NSApp.terminate(nil) },
+    present(PlatformTools.download, install: PlatformTools.install, cancelTitle: "Quit", cancel: { NSApp.terminate(nil) },
             closable: false, done: done)
   }
 

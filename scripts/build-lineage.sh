@@ -1,5 +1,5 @@
 #!/bin/bash
-# Builds a LineageOS arm64 emulator system image that Mini's emulator can boot.
+# Builds a LineageOS arm64 emulator system image that Mini can boot.
 # Run on Linux x86_64 (AOSP doesn't build on macOS): ~32 GB RAM, ~300 GB disk, a few hours cold.
 # Deps (Ubuntu 22.04+):
 #   sudo apt install bc bison build-essential ccache curl flex git git-lfs gnupg gperf libelf-dev \
@@ -42,4 +42,4 @@ name="$branch-sdk_phone_arm64-$(date +%Y%m%d).zip"
 cp "$zip" "$dest/$name"
 (cd "$dest" && sha256sum "$name" > "$name.sha256")
 echo "built $dest/$name"
-echo "install: unzip into \$ANDROID_SDK_ROOT/system-images/android-37/lineage/ (the zip holds arm64-v8a/)"
+echo "install: unzip into ~/Library/Application Support/Mini/system-images/android-37/lineage/ (the zip holds arm64-v8a/)"

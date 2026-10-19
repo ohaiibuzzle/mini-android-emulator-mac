@@ -1,7 +1,7 @@
 import AppKit
 
 /// Mini's own engine: upstream QEMU with patches/qemu, gfxstream and rutabaga built from source (scripts/build-qemu.sh).
-/// It boots the same AVD and image files as the emulator, so a device can switch engines and keep its data.
+/// It boots Google's goldfish system images, with each device's config and disks under Prefs.devices.
 enum Qemu {
   /// Bundled into Mini.app by bundle.sh; a `swift run` build uses the repo's third_party/install.
   static var root: String {
@@ -60,9 +60,9 @@ enum Qemu {
     return out
   }
 
-  /// The emulator's disks if it made them, else fresh ones, as vda...vde: vendor, metadata key, userdata, cache, system.
+  /// The device's disks, made on first boot, as vda...vde: vendor, metadata key, userdata, cache, system.
   /// (virtio-mmio slots fill from the top, which puts system at a003600, what androidboot.boot_devices names.)
-  /// Writable disks are the emulator's layout too: a sparse raw base and a qcow2 overlay on it, which savevm needs.
+  /// Writable disks are a sparse raw base and a qcow2 overlay on it, which savevm needs.
   static func disks(dir: String, sysdir: String, storageMB: Int) throws -> [(path: String, readOnly: Bool)] {
     let fm = FileManager.default
     func overlay(_ name: String, create: (String) throws -> Void) throws -> String {
@@ -118,12 +118,8 @@ enum Qemu {
     let ini = Prefs.ini(try String(contentsOfFile: Prefs.configPath(avd: avd), encoding: .utf8))
     let config = DeviceConfig(ini)
     let dir = (Prefs.configPath(avd: avd) as NSString).deletingLastPathComponent
-    let sysdir = Prefs.sdk + "/" + config.sysdir
+    let sysdir = Prefs.home + "/" + config.sysdir
     let d = UserDefaults.standard
-
-    // Data stays shared with the emulator, whose quick-boot snapshot would roll the disks back to before this boot.
-    // shortcut: the snapshot's qcow2-internal copy stays and keeps its space until the emulator overwrites it.
-    try? FileManager.default.removeItem(atPath: dir + "/snapshots/default_boot")
 
     let vbmeta = ((try? String(contentsOfFile: sysdir + "VerifiedBootParams.textproto", encoding: .utf8)) ?? "")
       .split(separator: "\n").compactMap { $0.hasPrefix("param: \"") ? String($0.dropFirst(8).dropLast()) : nil }
@@ -185,29 +181,11 @@ enum MiniMsg {
 
   /// W3C key names Mini's buttons send → Linux key codes the virtio keyboard has (Android's Generic.kl).
   static let named: [String: Int32] = ["GoBack": 158, "GoHome": 172, "Power": 116, "AudioVolumeUp": 115, "AudioVolumeDown": 114]
-
-  /// ScreenView's gRPC-shaped events as mini-display messages.
-  static func encode(_ ev: InputEvent) -> [Data] {
-    switch ev.type {
-    case .touchEvent(let t)?:
-      return t.touches.prefix(1).map { encode(touch, $0.x, $0.y, $0.pressure > 0 ? 1 : 0) }
-    case .keyEvent(let k)? where k.key == "AppSwitch":
-      // KEY_APPSELECT has no QEMU key code, so the virtio keyboard can't send it.
-      Task { await GuestSetup.adb(["-s", GuestSetup.serial, "shell", "input keyevent KEYCODE_APP_SWITCH"]) }
-      return []
-    case .keyEvent(let k)? where !k.key.isEmpty:
-      return named[k.key].map { [encode(key, $0, 1), encode(key, $0, 0)] } ?? []
-    case .keyEvent(let k)?:
-      return [encode(k.codeType == .mac ? macKey : key, k.keyCode, k.eventType == .keydown ? 1 : 0)]
-    default:
-      return []
-    }
-  }
 }
 
 /// Runs adb against the guest: registers it with the adb server, then sets up what the boot can't.
 enum GuestSetup {
-  static var adb: String { Prefs.sdk + "/platform-tools/adb" }
+  static var adb: String { PlatformTools.dir + "/adb" }
 
   @discardableResult
   static func adb(_ args: [String]) async -> Bool {
@@ -248,7 +226,7 @@ enum GuestSetup {
 
   /// Waits for boot, then gives the guest internet: the image only routes through Wi-Fi, so virt_wifi dresses eth0
   /// (QEMU's user network) up as the "VirtWifi" access point. That needs root, and `adb root` restarts adbd, which
-  /// drops the transport, so the guest is registered again. Then lifts the refresh cap like the emulator path does.
+  /// drops the transport, so the guest is registered again. Then lifts Android's 60 Hz default refresh cap.
   static func afterBoot(refreshHz: Int) async {
     await reach()
     guard await adb(["-s", serial, "shell", "until [ \"$(getprop sys.boot_completed)\" = 1 ]; do sleep 1; done"]) else { return }

@@ -1,27 +1,21 @@
 #!/bin/sh
-# Builds build/Mini.app. The Android Emulator is not bundled (its SDK license forbids that); Mini downloads it on first run.
-# Bundles Mini's own QEMU engine (scripts/build-qemu.sh: GPL-2.0 QEMU, Apache-2.0 gfxstream, BSD rutabaga, and the
-# Homebrew libraries they link) under Contents/Resources/qemu, and a MoltenVK built with private Metal APIs (Apache-2.0, redistributable): it adds VK_EXT_provoking_vertex,
-# which guest ANGLE needs for GLES 3.x.
+# Builds build/Mini.app. Bundles Mini's QEMU engine (scripts/build-qemu.sh: GPL-2.0 QEMU, Apache-2.0 gfxstream, BSD
+# rutabaga, a MoltenVK built with private Metal APIs for VK_EXT_provoking_vertex, and the Homebrew libraries they link)
+# under Contents/Resources/qemu. Google's adb and system images are not bundled (SDK license); Mini downloads them.
 set -eu
 root=$(cd "$(dirname "$0")/.." && pwd)
 app=$root/build/Mini.app
-mvk=$root/build/moltenvk
-dylib=$mvk/Package/Release/MoltenVK/dynamic/dylib/macOS/libMoltenVK.dylib
 
 # Command Line Tools' Swift 6.2 can't load its own SWBBuildService (dyld error), and the Metal shaders need Xcode anyway.
 case ${DEVELOPER_DIR:-$(xcode-select -p 2>/dev/null)} in
   *CommandLineTools*) echo "bundle: needs Xcode's toolchain: sudo xcode-select -s /Applications/Xcode.app (or unset DEVELOPER_DIR)" >&2; exit 1 ;;
 esac
-"$root/scripts/build-moltenvk.sh"
-"$root/scripts/build-qemu.sh"
+"$root/scripts/build-qemu.sh"  # builds MoltenVK too
 swift build -c release --package-path "$root/frontend"
 
 rm -rf "$app"
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
 cp "$root/frontend/.build/release/Mini" "$app/Contents/MacOS/Mini"
-cp "$dylib" "$app/Contents/Resources/libMoltenVK.dylib"
-cp "$mvk/LICENSE" "$app/Contents/Resources/MoltenVK-LICENSE.txt"
 cp "$root/scripts/gsi-image.py" "$app/Contents/Resources/gsi-image.py"  # Devices → Import GSI runs it
 
 # QEMU plus every non-system library it pulls in, pointed at qemu/lib.
@@ -46,6 +40,7 @@ relocate "$q/bin/qemu-img"
 cp "$root/third_party/qemu/COPYING" "$q/licenses/QEMU-COPYING.txt"
 cp "$root/third_party/gfxstream/LICENSE" "$q/licenses/gfxstream-LICENSE.txt"
 cp "$root/third_party/rutabaga_gfx/LICENSE" "$q/licenses/rutabaga_gfx-LICENSE.txt"
+cp "$root/build/moltenvk/LICENSE" "$q/licenses/MoltenVK-LICENSE.txt"
 # shortcut: the Homebrew libraries' own license texts (glib/gettext LGPL, pixman MIT, slirp & pcre2 BSD) aren't copied;
 # add them before handing Mini.app to anyone, along with where to get QEMU's source (GPL).
 
@@ -63,9 +58,8 @@ cat > "$app/Contents/Info.plist" <<PLIST
   <key>NSMicrophoneUsageDescription</key><string>Android apps on your devices can use the microphone.</string>
 </dict></plist>
 PLIST
-codesign --force -s - "$app/Contents/Resources/libMoltenVK.dylib"
 for f in "$q"/lib/* "$q"/bin/lib64/vulkan/*.dylib "$q/bin/qemu-img"; do codesign --force -s - "$f"; done
 # HVF refuses processes without the hypervisor entitlement.
 codesign --force -s - --entitlements "$root/third_party/qemu/accel/hvf/entitlements.plist" "$q/bin/qemu-system-aarch64"
 codesign --force -s - "$app"
-echo "built $app (private-API MoltenVK, QEMU engine)"
+echo "built $app"

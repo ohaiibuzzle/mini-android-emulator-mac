@@ -1,7 +1,7 @@
 import AppKit
 import SwiftUI
 
-/// An installed system-image dir under the SDK, named the way config.ini's image.sysdir.1 names it.
+/// An installed system-image dir under Mini's folder, named the way config.ini's image.sysdir.1 names it.
 struct SystemImage: Hashable, Identifiable {
   let sysdir: String  // "system-images/android-37.0/google_apis/arm64-v8a/"
   let props: [String: String]  // source.properties
@@ -14,7 +14,7 @@ struct SystemImage: Hashable, Identifiable {
 
   /// Every `system-images/<api>/<tag>/<abi>/` that has a system.img.
   static func installed() -> [SystemImage] {
-    let fm = FileManager.default, root = Prefs.sdk + "/"
+    let fm = FileManager.default, root = Prefs.home + "/"
     let ls = { (p: String) in ((try? fm.contentsOfDirectory(atPath: root + p)) ?? []).filter { !$0.hasPrefix(".") }.sorted() }
     var dirs: [String] = []
     for api in ls("system-images") {
@@ -27,19 +27,14 @@ struct SystemImage: Hashable, Identifiable {
   }
 }
 
-/// The part of an AVD's config.ini that Mini edits. Kept to plain emulator keys so a future
-/// QEMU+gfxstream launcher can read the same file and image dirs without a migration.
+/// The part of a device's config.ini that Mini edits, in the emulator's keys.
 struct DeviceConfig: Equatable {
   var size = DisplaySize()
   var ramMB = 2048
-  var storageMB = 6144  // userdata; the emulator only applies a new size to a freshly made partition
+  var storageMB = 6144  // userdata; a new size only applies to a freshly made data disk
   var freeform = false
   var refreshHz = 60
   var sysdir = BaseImage.sysdir  // read-only after creation
-  var engine = Engine.emulator
-
-  /// Google's emulator, or Mini's patched upstream QEMU (Qemu.swift). Both boot the same image and disks.
-  enum Engine: String { case emulator, qemu }
 
   static let refreshChoices = [60, 90, 120]
 
@@ -53,7 +48,6 @@ struct DeviceConfig: Equatable {
     freeform = ini["display.settings.xml"] == "freeform"
     refreshHz = ini["hw.lcd.vsync"].flatMap(Int.init) ?? refreshHz
     sysdir = ini["image.sysdir.1"] ?? sysdir
-    engine = ini["mini.engine"].flatMap(Engine.init) ?? engine
   }
 
   /// Sizes with an optional M or G suffix. A bare number is MB for hw.ramSize but bytes for
@@ -65,17 +59,16 @@ struct DeviceConfig: Equatable {
     return Int(v).map { $0 * bare / (1 << 20) }
   }
 
-  /// Within what the emulator boots.
+  /// Within what the guest boots with.
   var valid: Bool { size.valid && (1024...65536).contains(ramMB) && (2048...1 << 20).contains(storageMB) }
 
   var values: [String: String?] {
     [
       "hw.lcd.width": "\(size.width)", "hw.lcd.height": "\(size.height)", "hw.lcd.density": "\(size.density)",
       "hw.ramSize": "\(ramMB)M", "disk.dataPartition.size": "\(storageMB)M",
-      // The emulator turns this into androidboot.qemu.display.settings.xml; Google's provisioning app enables desktop windows.
+      // Becomes androidboot.qemu.display.settings.xml; Google's provisioning app enables desktop windows.
       "display.settings.xml": freeform ? "freeform" : nil,
       "hw.lcd.vsync": "\(refreshHz)",  // the guest display's only mode; Mini lifts Android's 60 Hz default cap after boot
-      "mini.engine": engine == .qemu ? "qemu" : nil,  // the emulator ignores keys it doesn't know
     ]
   }
 
@@ -92,55 +85,41 @@ struct DeviceConfig: Equatable {
 
 @MainActor
 enum Devices {
-  /// The AVD this Mini process is running, if any.
+  /// The device this Mini process is running, if any.
   static var running: String?
 
   static func validName(_ name: String) -> Bool {
     !name.isEmpty && name.allSatisfy { $0.isASCII && ($0.isLetter || $0.isNumber || "._-".contains($0)) }
   }
 
-  /// Writes `<name>.ini` and `<name>.avd/config.ini`; the emulator fills in every other hw.* default and
-  /// copies userdata from the image on first boot.
+  /// Writes `Devices/<name>/config.ini`; Qemu.disks makes the disks on first boot.
   static func create(name: String, image: SystemImage, config: DeviceConfig) throws {
-    let fm = FileManager.default, dir = "\(Prefs.avdHome)/\(name).avd"
-    guard validName(name), !fm.fileExists(atPath: dir), !fm.fileExists(atPath: "\(Prefs.avdHome)/\(name).ini") else {
-      throw SetupError("\(name) exists or isn't a valid device name")
-    }
+    let fm = FileManager.default, dir = "\(Prefs.devices)/\(name)"
+    guard validName(name), !fm.fileExists(atPath: dir) else { throw SetupError("\(name) exists or isn't a valid device name") }
     try fm.createDirectory(atPath: dir, withIntermediateDirectories: true)
-    let pointer: [String: String?] = ["avd.ini.encoding": "UTF-8", "path": dir, "path.rel": "avd/\(name).avd", "target": image.target]
-    try Prefs.ini("", setting: pointer).write(toFile: "\(Prefs.avdHome)/\(name).ini", atomically: true, encoding: .utf8)
     var c = config
     c.sysdir = image.sysdir
-    let base: [String: String?] = [
-      "avd.ini.encoding": "UTF-8", "avd.name": name, "avd.id": name, "PlayStore.enabled": "no",
-      "abi.type": image.abi, "hw.cpu.arch": "arm64", "hw.cpu.ncore": "4",
-      "hw.keyboard": "yes",  // without it the guest has no keyboard device and keys are dropped
-      "hw.gpu.enabled": "yes", "hw.gpu.mode": "host", "hw.initialOrientation": "portrait",
-      "hw.sdCard": "yes", "sdcard.size": "512 MB", "fastboot.forceFastBoot": "yes",
-      "image.sysdir.1": image.sysdir, "tag.id": image.tagID, "tag.display": image.tagDisplay, "target": image.target,
-    ]
+    let base: [String: String?] = ["hw.cpu.ncore": "4", "image.sysdir.1": image.sysdir]
     try Prefs.ini("", setting: base.merging(c.values) { _, new in new })
       .write(toFile: "\(dir)/config.ini", atomically: true, encoding: .utf8)
   }
 
-  /// Moves the device's directory to the Trash (recoverable) and drops its pointer file. Its system image stays.
+  /// Moves the device's directory to the Trash (recoverable). Its system image stays.
   static func delete(_ name: String) throws {
-    let dir = URL(fileURLWithPath: Prefs.configPath(avd: name)).deletingLastPathComponent()
-    try FileManager.default.trashItem(at: dir, resultingItemURL: nil)
-    try FileManager.default.removeItem(atPath: "\(Prefs.avdHome)/\(name).ini")
+    try FileManager.default.trashItem(at: URL(fileURLWithPath: "\(Prefs.devices)/\(name)"), resultingItemURL: nil)
   }
 
-  /// What a data wipe removes; the emulator recreates userdata from the image at the configured size.
+  /// What a data wipe removes; Qemu.disks makes a fresh data disk at the configured size.
   static func dataFiles(_ name: String) -> [String] {
     let dir = URL(fileURLWithPath: Prefs.configPath(avd: name)).deletingLastPathComponent().path
-    return ["userdata-qemu.img", "userdata-qemu.img.qcow2", "snapshots"].map { "\(dir)/\($0)" }
+    return ["userdata-qemu.img", "userdata-qemu.img.qcow2"].map { "\(dir)/\($0)" }
   }
 
   static func erase(_ name: String) throws {
     for path in dataFiles(name) where FileManager.default.fileExists(atPath: path) { try FileManager.default.removeItem(atPath: path) }
   }
 
-  /// Quits (the emulator saves its snapshot) and reopens Mini on `name`, erasing its data in between if asked.
+  /// Quits (the guest shuts down) and reopens Mini on `name`, erasing its data in between if asked.
   static func relaunch(with name: String, erase: Bool = false) {
     UserDefaults.standard.set(name, forKey: Prefs.avd)
     // shortcut: a `swift run` build isn't an app bundle, so it just quits; relaunch it by hand.
@@ -173,7 +152,7 @@ enum GSIImport {
   }
 
   static func run(gsi: URL, name: String) async throws -> SystemImage {
-    let out = Prefs.sdk + "/" + sysdir(for: name)
+    let out = Prefs.home + "/" + sysdir(for: name)
     try FileManager.default.createDirectory(at: log.deletingLastPathComponent(), withIntermediateDirectories: true)
     FileManager.default.createFile(atPath: log.path, contents: nil)
     let p = Process()
@@ -272,17 +251,6 @@ struct DevicesView: View {
         TextField("Density (dpi)", value: $config.size.density, format: .number.grouping(.never))
         Text("\(config.size.width * 160 / max(config.size.density, 1)) dp wide").font(.caption).foregroundStyle(.secondary)
       }
-      Section("Engine") {
-        Picker("Runs on", selection: $config.engine) {
-          Text("Android Emulator").tag(DeviceConfig.Engine.emulator)
-          Text("QEMU (Mini's own)").tag(DeviceConfig.Engine.qemu)
-        }
-        .disabled(!Qemu.installed && config.engine == .emulator)
-        Text(Qemu.installed || config.engine == .qemu
-          ? "Both share this device's data. QEMU has no audio, camera or quick boot, and needs a rootable image for internet."
-          : "QEMU isn't built into this Mini; run scripts/build-qemu.sh.")
-          .font(.caption).foregroundStyle(.secondary)
-      }
       Section("Hardware") {
         TextField("Memory (MB)", value: $config.ramMB, format: .number.grouping(.never))
         TextField("Storage (MB)", value: $config.storageMB, format: .number.grouping(.never))
@@ -296,7 +264,7 @@ struct DevicesView: View {
       }
       Section {
         HStack {
-          Text(error ?? "Changes apply the next time the device boots; the quick-boot snapshot is discarded.")
+          Text(error ?? "Changes apply the next time the device boots.")
             .font(.caption).foregroundStyle(error == nil ? Color.secondary : Color.red)
           Spacer()
           Button("Save") { if erasing { eraseThenStart = false } else { commit(name, start: false) } }

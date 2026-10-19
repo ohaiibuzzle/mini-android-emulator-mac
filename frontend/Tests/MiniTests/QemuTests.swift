@@ -26,14 +26,4 @@ import Testing
 
 @Test func miniMessagesAreSixteenLittleEndianBytes() {
   #expect(MiniMsg.encode(MiniMsg.touch, 384, 638, 1) == Data([1, 0, 0, 0, 0x80, 1, 0, 0, 0x7e, 2, 0, 0, 1, 0, 0, 0]))
-  var back = InputEvent()
-  back.keyEvent.key = "GoBack"
-  #expect(MiniMsg.encode(back) == [MiniMsg.encode(MiniMsg.key, 158, 1), MiniMsg.encode(MiniMsg.key, 158, 0)])
-}
-
-@Test func engineRoundTripsThroughConfig() {
-  var c = DeviceConfig()
-  c.engine = .qemu
-  #expect(DeviceConfig(Prefs.ini(Prefs.ini("", setting: c.values))).engine == .qemu)
-  #expect(DeviceConfig().values["mini.engine"] == .some(nil))
 }

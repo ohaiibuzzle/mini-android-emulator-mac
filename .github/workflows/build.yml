@@ -1,5 +1,5 @@
 # Builds the parts Mini ships (private-API MoltenVK + the Swift app) into an unsigned Mini.app.
-# The Android Emulator and system images are not built or bundled: Mini downloads the emulator on first run.
+# Google's adb and system images are not built or bundled: Mini downloads them.
 name: build
 on:
   push:
@@ -36,7 +36,6 @@ jobs:
     runs-on: macos-26
     steps:
       - uses: actions/checkout@v7
-      - run: brew install protobuf
       - run: swift test --package-path frontend
       - uses: actions/download-artifact@v8
         with:

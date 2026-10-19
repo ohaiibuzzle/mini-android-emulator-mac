@@ -1,30 +1,26 @@
 import AppKit
 import SwiftUI
 
-/// User options (UserDefaults). Everything that costs performance is off by default.
+/// User options (UserDefaults).
 enum Prefs {
-  static let gles = "gles"  // "angle" | "translator"
-  static let audio = "audio"
-  static let radios = "radios"
-  static let cameras = "cameras"
   static let debugLogs = "debugLogs"
   static let avd = "avd"
 
-  static var sdk: String { ProcessInfo.processInfo.environment["ANDROID_HOME"] ?? NSHomeDirectory() + "/Library/Android/sdk" }
-  static var avdHome: String { ProcessInfo.processInfo.environment["ANDROID_AVD_HOME"] ?? NSHomeDirectory() + "/.android/avd" }
+  /// Mini's folder: system images and platform-tools in the SDK's layout, devices under Devices/. MINI_HOME is for tests.
+  static var home: String {
+    ProcessInfo.processInfo.environment["MINI_HOME"]
+      ?? FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appendingPathComponent("Mini").path
+  }
+  static var devices: String { home + "/Devices" }
 
-  /// AVD names from the avd home (`*.ini` next to each `*.avd` directory).
+  /// Device names: the directories under Devices/ that have a config.ini.
   static func avds() -> [String] {
-    let files = (try? FileManager.default.contentsOfDirectory(atPath: avdHome)) ?? []
-    return files.filter { $0.hasSuffix(".ini") }.map { String($0.dropLast(4)) }.sorted()
+    let names = (try? FileManager.default.contentsOfDirectory(atPath: devices)) ?? []
+    return names.filter { FileManager.default.fileExists(atPath: configPath(avd: $0)) }.sorted()
   }
 
-  /// The AVD's own hardware config; `<name>.ini` says where its directory is.
-  static func configPath(avd: String) -> String {
-    let pointer = try? String(contentsOfFile: "\(avdHome)/\(avd).ini", encoding: .utf8)
-    let dir = pointer.flatMap { ini($0)["path"] } ?? "\(avdHome)/\(avd).avd"
-    return dir + "/config.ini"
-  }
+  /// The device's hardware config, in the emulator's config.ini keys.
+  static func configPath(avd: String) -> String { "\(devices)/\(avd)/config.ini" }
 
   static func ini(_ text: String) -> [String: String] {
     var out: [String: String] = [:]
@@ -51,26 +47,8 @@ enum Prefs {
 
   static func register() {
     UserDefaults.standard.register(defaults: [
-      gles: "angle", audio: false, radios: false, cameras: false, debugLogs: false, avd: avds().first ?? "",
+      debugLogs: false, avd: avds().first ?? "",
     ])
-  }
-
-  /// Emulator command line for the current settings.
-  static func emulatorArgs(avd: String, grpcPort: Int) -> [String] {
-    let d = UserDefaults.standard
-    var args = ["-avd", avd, "-no-window", "-gpu", "host", "-grpc", "\(grpcPort)", "-grpc-use-token"]
-    var features: [String] = []
-    // ANGLE: guest GLES on ANGLE over gfxstream Vulkan (MoltenVK). Translator: host GLES→desktop GL.
-    if d.string(forKey: gles) == "angle" { features.append("GuestUsesAngle") }
-    if !d.bool(forKey: audio) { args.append("-no-audio") }
-    if !d.bool(forKey: radios) {
-      // Wi-Fi stays: the guest's only internet route is virtio-wifi. These drop netsimd (BT/UWB) and the modem.
-      features += ["-BluetoothEmulation", "-Uwb", "-ModemSimulator", "-WiFiPacketStream"]
-    }
-    if !d.bool(forKey: cameras) { args += ["-camera-back", "none", "-camera-front", "none"] }
-    if d.bool(forKey: debugLogs) { args += ["-show-kernel", "-logcat", "*:w"] }
-    if !features.isEmpty { args += ["-feature", features.joined(separator: ",")] }
-    return args
   }
 }
 
@@ -83,28 +61,17 @@ struct DisplaySize: Hashable {
     ("Desktop", DisplaySize(width: 2560, height: 1440, density: 240)),
   ]
 
-  // Guards against typos the emulator would only reject at boot.
+  // Guards against typos the guest would only reject at boot.
   var valid: Bool { (320...7680).contains(width) && (320...7680).contains(height) && (120...640).contains(density) }
 }
 
 struct SettingsView: View {
-  @AppStorage(Prefs.gles) var gles = "angle"
-  @AppStorage(Prefs.audio) var audio = false
-  @AppStorage(Prefs.radios) var radios = false
-  @AppStorage(Prefs.cameras) var cameras = false
   @AppStorage(Prefs.debugLogs) var debugLogs = false
 
   var body: some View {
     Form {
-      Picker("OpenGL ES", selection: $gles) {
-        Text("ANGLE in guest (Vulkan → MoltenVK)").tag("angle")
-        Text("Host translator (desktop GL)").tag("translator")
-      }
-      Toggle("Audio", isOn: $audio)
-      Toggle("Radios (Bluetooth, UWB, cellular modem)", isOn: $radios)
-      Toggle("Cameras", isOn: $cameras)
-      Toggle("Kernel console and logcat in emulator log", isOn: $debugLogs)
-      Text("Changes apply the next time the emulator starts. Devices and their screens are in Devices (⇧⌘D).")
+      Toggle("Kernel console and logcat logs", isOn: $debugLogs)
+      Text("Changes apply the next time a device starts. Devices and their screens are in Devices (⇧⌘D).")
         .font(.caption).foregroundStyle(.secondary)
     }
     .formStyle(.grouped)
