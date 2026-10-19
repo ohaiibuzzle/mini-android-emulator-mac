@@ -68,17 +68,19 @@ index d345f6c..3e9e7f4 100644
    'ui-qmp-cmds.c',
 diff --git a/ui/mini.c b/ui/mini.c
 new file mode 100644
-index 0000000..e9c4447
+index 0000000..604728c
 --- /dev/null
 +++ b/ui/mini.c
-@@ -0,0 +1,262 @@
+@@ -0,0 +1,282 @@
 +/*
 + * mini-display: hands the first graphic console to the Mini front-end.
 + *
-+ *   -object mini-display,id=mini,chardev=<socket chardev>,shm=<file>
++ *   -object mini-display,id=mini,chardev=<socket chardev>,shm=</name>
 + *
-+ * Mini creates <file> (two RGBX frames of up to <side>x<side>, side being
-+ * the longer screen edge) and connects to the chardev. On every update the
++ * Mini creates the POSIX shared memory object </name> (a file's pages would
++ * keep being written back to disk) holding two RGBX frames of up to
++ * <side>x<side>, side being the longer screen edge, and connects to the
++ * chardev. On every update the
 + * console is copied, turned by the current rotation, into the frame Mini
 + * isn't showing and a FrameMsg names it. Mini sends InputMsgs back: touch in
 + * panel pixels, Linux or macOS key codes, and the device rotation, which
@@ -128,6 +130,8 @@ index 0000000..e9c4447
 +    bool touching;
 +    InputMsg in;
 +    size_t in_len;
++    FrameMsg out;       /* a FrameMsg the socket took only part of */
++    size_t out_sent;    /* bytes of it already sent; sizeof(out) when none pending */
 +};
 +
 +static void mini_update(DisplayChangeListener *dcl, int x, int y, int w, int h)
@@ -138,6 +142,19 @@ index 0000000..e9c4447
 +    /* Flips pass through QEMU's "Display output is not active" placeholder. */
 +    if (!surf || surface_is_placeholder(surf) || !qemu_chr_fe_backend_open(&s->chr)) {
 +        return;
++    }
++    /*
++     * Messages are fixed-size and the socket is non-blocking: finish a
++     * partly sent one before anything else, or Mini's framing slips for
++     * good. Until then skip frames rather than block the main loop.
++     */
++    if (s->out_sent < sizeof(s->out)) {
++        int n = qemu_chr_fe_write(&s->chr, (uint8_t *)&s->out + s->out_sent,
++                                  sizeof(s->out) - s->out_sent);
++        s->out_sent += MAX(n, 0);
++        if (s->out_sent < sizeof(s->out)) {
++            return;
++        }
 +    }
 +    int pw = surface_width(surf), ph = surface_height(surf);
 +    bool turned = s->rotation & 1;
@@ -172,8 +189,9 @@ index 0000000..e9c4447
 +    pixman_image_set_transform(surf->image, NULL);
 +    pixman_image_unref(dst);
 +
-+    FrameMsg f = { dw, dh, s->rotation & 3, s->buffer };
-+    qemu_chr_fe_write(&s->chr, (uint8_t *)&f, sizeof(f));  /* dropped if Mini is behind */
++    s->out = (FrameMsg){ dw, dh, s->rotation & 3, s->buffer };
++    int n = qemu_chr_fe_write(&s->chr, (uint8_t *)&s->out, sizeof(s->out));
++    s->out_sent = n > 0 ? n : sizeof(s->out);  /* nothing sent: the frame is just dropped */
 +}
 +
 +/* A new surface is empty until the guest's next flush, which sends it. */
@@ -257,6 +275,7 @@ index 0000000..e9c4447
 +    if (event == CHR_EVENT_OPENED) {
 +        DisplaySurface *surf = qemu_console_surface(s->dcl.con);
 +        s->in_len = 0;
++        s->out_sent = sizeof(s->out);
 +        if (surf) {  /* first frame right away */
 +            mini_update(&s->dcl, 0, 0, surface_width(surf), surface_height(surf));
 +        }
@@ -280,7 +299,7 @@ index 0000000..e9c4447
 +        error_setg(errp, "mini-display needs chardev= and shm=");
 +        return;
 +    }
-+    int fd = open(s->shm, O_RDWR);
++    int fd = shm_open(s->shm, O_RDWR, 0);
 +    struct stat st;
 +    if (fd < 0 || fstat(fd, &st) < 0) {
 +        error_setg_errno(errp, errno, "mini-display: cannot open %s", s->shm);
@@ -300,6 +319,7 @@ index 0000000..e9c4447
 +    for (int i = 0; i < INPUT_EVENT_SLOTS_MAX; i++) {
 +        s->slots[i].tracking_id = -1;
 +    }
++    s->out_sent = sizeof(s->out);
 +    if (!qemu_chr_fe_init(&s->chr, chr, errp)) {
 +        return;
 +    }

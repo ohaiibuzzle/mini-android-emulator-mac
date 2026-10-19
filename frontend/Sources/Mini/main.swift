@@ -1,4 +1,5 @@
 import AppKit
+import CShm
 import GRPCCore
 import GRPCNIOTransportHTTP2
 
@@ -11,15 +12,20 @@ typealias PhysicalModel = Android_Emulation_Control_PhysicalModelValue
 let avd = CommandLine.arguments.firstIndex(of: "--start").flatMap { CommandLine.arguments.dropFirst($0 + 1).first } ?? ""
 let grpcPort = 8554
 
-/// File the emulator writes RGBA frames into (ImageTransport.MMAP); we map the same file.
+/// Memory the emulator (ImageTransport.MMAP, a file) or QEMU (`shared`: POSIX shared memory) writes RGBA frames into.
+/// QEMU gets shared memory because a mapped file is written back to disk: hundreds of MB/s at 60 frames a second.
 final class FrameBuffer: @unchecked Sendable {
-  let path = NSTemporaryDirectory() + "mini-\(getpid()).fb"
+  let path: String
   let ptr: UnsafeMutableRawPointer
   let size: Int
+  private let shared: Bool
 
-  init(maxSide: Int, count: Int = 1) throws {
+  init(maxSide: Int, count: Int = 1, shared: Bool = false) throws {
     size = maxSide * maxSide * 4 * count  // square bound so rotation never overflows
-    let fd = open(path, O_RDWR | O_CREAT | O_TRUNC, 0o600)
+    self.shared = shared
+    path = shared ? "/mini-\(getpid())" : NSTemporaryDirectory() + "mini-\(getpid()).fb"
+    if shared { shm_unlink(path) }  // a leftover from a crashed run would refuse ftruncate
+    let fd = shared ? mini_shm_open(path, O_RDWR | O_CREAT | O_EXCL, 0o600) : open(path, O_RDWR | O_CREAT | O_TRUNC, 0o600)
     guard fd >= 0, ftruncate(fd, off_t(size)) == 0,
       let p = mmap(nil, size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0), p != MAP_FAILED
     else { throw POSIXError(.init(rawValue: errno) ?? .EIO) }
@@ -27,7 +33,10 @@ final class FrameBuffer: @unchecked Sendable {
     ptr = p
   }
 
-  deinit { munmap(ptr, size); unlink(path) }
+  /// Drops the name once the other side has mapped it; the memory lives on until both unmap.
+  func unlinkName() { _ = shared ? shm_unlink(path) : unlink(path) }
+
+  deinit { munmap(ptr, size); unlinkName() }
 
   // shortcut: the emulator may write while we read, so frames can tear; upgrade to double-buffered shm if visible.
   func image(width: Int, height: Int, offset: Int = 0) -> CGImage? {
@@ -231,7 +240,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     if qemu, let config {
       do {
         let side = max(config.size.width, config.size.height)
-        fb = try FrameBuffer(maxSide: side, count: 2)
+        fb = try FrameBuffer(maxSide: side, count: 2, shared: true)
         emulator.executableURL = URL(fileURLWithPath: Qemu.binary)
         emulator.environment = ProcessInfo.processInfo.environment.merging(["ANDROID_EMU_VK_ICD": "moltenvk"]) { _, new in new }
         emulator.arguments = try Qemu.arguments(
@@ -408,7 +417,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     onFrame: @escaping @Sendable (CGImage, Android_Emulation_Control_Rotation.SkinRotation) async -> Void
   ) async throws {
     let link = try await Qemu.connect(path)
-    unlink(fb.path)  // QEMU mapped it before it took connections; nothing is left behind if Mini dies
+    fb.unlinkName()  // QEMU mapped it before it took connections; nothing is left behind if Mini dies
     try await withThrowingTaskGroup(of: Void.self) { group in
       group.addTask {
         for await ev in inputs { for msg in MiniMsg.encode(ev) { try link.write(contentsOf: msg) } }

@@ -26,16 +26,24 @@ struct Modem {
 
   /// Answers the radio HAL on QEMU's modem port until QEMU goes away.
   static func run(socket: String, profile: URL) async throws {
-    var modem = Modem(profile: FileManager.default.fileExists(atPath: profile.path) ? profile : nil)
     let link = try await Qemu.connect(socket)
-    var line = ""
-    for try await byte in link.bytes {
-      switch byte {
-      case 0x0D:
-        if !line.isEmpty { try link.write(contentsOf: Data(modem.reply(to: line).utf8)) }
-        line = ""
-      case 0x0A: break
-      default: line.append(Character(UnicodeScalar(byte)))
+    let profile = FileManager.default.fileExists(atPath: profile.path) ? profile : nil
+    // Its own thread: FileHandle.bytes reads every handle on one serial queue, and this mostly idle read
+    // would sit there blocking the display stream's.
+    Thread.detachNewThread {
+      var modem = Modem(profile: profile)
+      var line = ""
+      var buf = [UInt8](repeating: 0, count: 1024)
+      while case let n = read(link.fileDescriptor, &buf, buf.count), n > 0 {
+        for byte in buf[..<n] {
+          switch byte {
+          case 0x0D:
+            if !line.isEmpty { try? link.write(contentsOf: Data(modem.reply(to: line).utf8)) }
+            line = ""
+          case 0x0A: break
+          default: line.append(Character(UnicodeScalar(byte)))
+          }
+        }
       }
     }
   }

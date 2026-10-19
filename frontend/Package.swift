@@ -13,12 +13,14 @@ let package = Package(
     .executableTarget(
       name: "Mini",
       dependencies: [
+        "CShm",
         .product(name: "GRPCCore", package: "grpc-swift-2"),
         .product(name: "GRPCProtobuf", package: "grpc-swift-protobuf"),
         .product(name: "GRPCNIOTransportHTTP2", package: "grpc-swift-nio-transport"),
       ],
       plugins: [.plugin(name: "GRPCProtobufGenerator", package: "grpc-swift-protobuf")]
     ),
+    .target(name: "CShm"),
     .testTarget(name: "MiniTests", dependencies: ["Mini"]),
   ]
 )
