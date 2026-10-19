@@ -8,6 +8,7 @@ A macOS (Apple Silicon) front-end that boots Google's goldfish/ranchu Android im
 - `patches/qemu/000N-*.patch`, `patches/rutabaga_gfx/`: our changes to the third-party trees.
 - `third_party/` (git-ignored): `qemu`, `gfxstream`, `rutabaga_gfx` checkouts, plus `install/` (the built engine).
 - `scripts/`: `build-qemu.sh` (engine + MoltenVK), `bundle.sh` (→ `build/Mini.app`), `build-mini.sh [device]` (rebundle and relaunch), `gsi-image.py` (GSI import, bundled into the app).
+- `assets/`: the app icon (`icon.svg`, rendered into the committed `Mini.icns` by `scripts/make-icon.sh`).
 - Runtime data lives in `~/Library/Application Support/Mini`: `platform-tools/`, `system-images/` (SDK layout), and `Devices/<name>/` (`config.ini` in the emulator's keys, the qcow2 overlays, `initrd-mini`). Logs go to `~/Library/Logs/Mini/<device>.log`.
 
 ## Commands

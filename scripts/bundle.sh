@@ -17,6 +17,7 @@ rm -rf "$app"
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
 cp "$root/frontend/.build/release/Mini" "$app/Contents/MacOS/Mini"
 cp "$root/scripts/gsi-image.py" "$app/Contents/Resources/gsi-image.py"  # Devices → Import GSI runs it
+cp "$root/assets/Mini.icns" "$app/Contents/Resources/Mini.icns"  # from assets/icon.svg via scripts/make-icon.sh
 
 # QEMU plus every non-system library it pulls in, pointed at qemu/lib.
 q=$app/Contents/Resources/qemu
@@ -49,6 +50,7 @@ cat > "$app/Contents/Info.plist" <<PLIST
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
   <key>CFBundleExecutable</key><string>Mini</string>
+  <key>CFBundleIconFile</key><string>Mini</string>
   <key>CFBundleIdentifier</key><string>dev.local.goldfish-mini</string>
   <key>CFBundleName</key><string>Mini</string>
   <key>CFBundlePackageType</key><string>APPL</string>

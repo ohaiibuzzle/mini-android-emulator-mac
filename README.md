@@ -1,58 +1,49 @@
-# android-goldfish-exp
+# Mini
 
-A small Android (goldfish/ranchu) emulator front-end for Apple Silicon. The plan is at `~/.claude/plans/plan-for-a-goldfish-based-swift-comet.md`.
+<img src="assets/icon.svg" width="128" align="right" alt="A tiny Android on a ruler saying hi">
 
-## Status
-- **Phase 1 (done):** prebuilt SDK emulator + API 37 arm64 image, with GPU findings and a device oracle captured locally in `oracle/` (gitignored).
-- **Phase 2 (done):** `frontend/`, a minimal Cocoa window (`Mini`).
-- **Phase 3 (works):** Mini's own engine. Upstream QEMU 11.1.2 with `patches/qemu`, plus gfxstream and rutabaga built from source, boots the stock goldfish image. It is now Mini's only engine: the Android Emulator backend is gone.
+A small Android emulator for Apple Silicon Macs. It boots Google's goldfish (ranchu) images on its own engine: upstream QEMU 11.1.2 with a few patches (`patches/`), plus gfxstream and rutabaga built from source. No Android Emulator, no Android Studio.
 
-## Run
+**Why "Mini"?** I named the folder "mini-android-emulator", and somehow that stuck.
+
+## Build and run
 ```sh
-scripts/bundle.sh && open build/Mini.app             # builds MoltenVK and QEMU on first use, then the app
-cd frontend && swift build && .build/debug/Mini --start goldfish37   # dev run
-scripts/build-mini.sh [device]                       # rebuild, quit Mini, reopen (on device, or in Devices)
+scripts/bundle.sh && open build/Mini.app   # first run builds MoltenVK and QEMU (brew deps: see scripts/build-qemu.sh)
+swift test --package-path frontend         # unit tests
 ```
-Requires Xcode at build time. CI (`.github/workflows/build.yml`, macOS 26 arm64) builds and caches the private-API MoltenVK, runs `swift test`, and uploads an unsigned `Mini.zip`. Downloaded builds are ad-hoc signed, so clear quarantine first: `xattr -dr com.apple.quarantine Mini.app`.
+Mini doesn't ship anything of Google's, because the Android SDK license forbids it. On first launch it shows that license and downloads platform-tools (adb). The API 37 system image is downloaded the same way when you create a device. Everything lives in `~/Library/Application Support/Mini`.
 
-**Downloads.** Google's SDK license doesn't allow shipping adb or system images, so Mini doesn't. On first launch Mini shows the license text from Google's SDK repository. Once you accept, it downloads pinned platform-tools (37.0.1, SHA-1 checked) into `~/Library/Application Support/Mini/platform-tools`; Mini drives the guest with that adb. The API 37 Google APIs image is offered the same way when you create the first device. Everything Mini keeps lives in that folder: `system-images/` in the SDK's layout, and `Devices/<name>/` with each device's `config.ini` and disks. Android Studio's SDK and AVDs are not used.
+## How a VM is created
+1. **An image.** The image is either Google's API 37 Google APIs image or an Android 17 GSI. **Import GSI** runs `scripts/gsi-image.py`, which puts the GSI's system next to Google's vendor and system_dlkm (copied out of the stock super partition) on a plain GPT disk. It also patches the ramdisk's fstab to mount them by name instead of as logical partitions. Images are kept read-only in `system-images/`, in the SDK layout.
+2. **A device.** **Devices → +** writes `Devices/<name>/config.ini`, using the emulator's keys for screen, RAM and storage. Nothing else happens yet.
+3. **First boot.** Mini puts each writable disk in a qcow2 overlay on a raw base: encryption key, cache and `/data`. `/data` starts as an ext4 made by `mke2fs`, seeded from the image's `data/`. It is made "pre-zeroed", or the guest spends minutes zeroing inode tables. `vendor.img` and `system.img` are attached straight from the image, read-only.
+4. **Boot config.** The emulator would normally write the boot configuration. Mini writes it itself as a Linux bootconfig appended to the image's ramdisk (`initrd-mini`). That config moves graphics from goldfish_pipe to virtio-gpu, and names the serial ports for the modem and Bluetooth.
+5. **QEMU** runs `-M virt -accel hvf` with `kernel-ranchu` and the virtio devices the goldfish vendor expects. Some of them have a host side in Mini:
+   - **vsock** (`android-vsock`, patch 0002) carries boot properties, sensors and adbd.
+   - **The modem and Bluetooth** run on virtio-serial ports. Mini answers both from Swift (`Modem.swift`, `Bluetooth.swift`).
+   - **The battery** is a fixed goldfish battery (patch 0004).
+6. **After boot,** Mini registers the guest with adb as `emulator-5554`. It wraps eth0 in `virt_wifi`, because the stock image only routes through Wi-Fi, and lifts the 60 Hz cap if you asked for more. Quitting runs `svc power shutdown` and waits, so `/data` is unmounted cleanly.
 
-**LineageOS image (optional).** `scripts/build-lineage.sh` builds a LineageOS 24.0 (Android 17, API 37) `sdk_phone_arm64` userdebug image from source. Run it on a Linux x86_64 box with about 32 GB RAM and 300 GB disk, since AOSP doesn't build on macOS and GitHub's free runners are too small. It writes `build/lineage/<branch>-sdk_phone_arm64-<date>.zip` plus a `.sha256`. Unzip it into `~/Library/Application Support/Mini/system-images/android-37/lineage/` and create a device from it in Devices.
-
-**Devices** (⇧⌘D) lists your devices. From there you can create one from any installed system image, set its screen size, memory, storage (changing it erases the device's data, since only a fresh data disk takes a new size), desktop windowing (freeform) and refresh rate (60/90/120 Hz; above 60 Mini lifts Android's 60 Hz default cap over adb after boot), Start it (Mini restarts on it), or move it to the Trash. Mini opens to this window; `--start <device>` boots that device directly (`open build/Mini.app --args --start goldfish37`). Mini can download Google's API 37 Google APIs image (about 2.2 GB, license shown first, SHA-1 checked).
-
-**Import GSI** (in Devices) turns an arm64 GSI (`.img` or `.img.xz`) into a device. It uses `scripts/gsi-image.py`, which is bundled in Mini.app and needs `brew install lz4 e2fsprogs`. The GSI boots on Google's API 37 kernel, vendor and ramdisk, with no super partition: the stock image's fstab is rewritten to mount plain GPT partitions. The result goes to `system-images/android-37.0/gsi_<name>/`. It contains Google's vendor, so don't redistribute it.
-
-**QEMU engine.** `scripts/build-qemu.sh` builds the engine into `third_party/install`; it needs `brew install meson ninja rust pkg-config glib pixman libslirp vulkan-loader`. `bundle.sh` runs it and copies QEMU, with its libraries rewritten to load from inside the app, into `Mini.app/Contents/Resources/qemu`. The patches:
-- `qemu/0001`: gfxstream feature flags and the display size for rutabaga.
-- `qemu/0002`: `android-vsock-pci`, a userspace virtio-vsock device. The goldfish vendor talks to the host over vsock: qemud boot properties and sensors on port 5000, adbd on 5555. The device serves those, including an accelerometer that follows Mini's rotate buttons.
-- `qemu/0003`: `mini-display`. It copies frames, rotated, into double-buffered POSIX shared memory that Mini maps, and takes touch, key and rotation messages over a socket.
-- `qemu/0004`: a fixed goldfish battery on `virt`: on AC, charging, 100%.
-- `qemu/0005`: display surfaces in POSIX shared memory (`qemu_shm_alloc`) on macOS, where QEMU's memfd fallback would use a temp file that gets written to disk every frame.
-- `rutabaga_gfx/0001`: the display size in rutabaga's C interface.
-
-Mini also answers the guest's Bluetooth itself: `bt_vhci_forwarder` bridges `/dev/vhci` to a virtio-console port, and
-`frontend/Sources/Mini/Bluetooth.swift` plays a dummy HCI controller on the host end. With nothing there, the kernel's
-HCI setup never finishes, `hci0` stays hidden from mgmt and Android's Bluetooth HAL spins a core; with it, Bluetooth
-switches on (Classic only, no LE) and idles.
-
-The guest uses ANGLE on gfxstream Vulkan over virtio-gpu, with minigbm gralloc. Mini writes the bootconfig itself (`Devices/<name>/initrd-mini`). After boot it registers the guest with adb as `emulator-5554` and, through `adb root`, wraps eth0 in the guest's `virt_wifi` driver. That driver shows QEMU's user network to Android as the "VirtWifi" access point, since the image only routes through Wi-Fi. A new device gets an ext4 data disk made with `mke2fs` (`brew install e2fsprogs`). Quitting runs `svc power shutdown` while the window shows "Android is shutting down…", so /data unmounts cleanly.
-
-| Input | Action |
-|---|---|
-| click / drag | touch |
-| typing | keys (Mac keycodes → evdev) |
-| title bar | Back, Home, Overview, Rotate ⟲/⟳, Volume −/+, Power, Screenshot (saved to Desktop) |
-| ⌘⇧H / ⌘⌫ / ⌘O / ⌘P | Home / Back / Overview / Power |
-| ⌘, / ⌘L | Settings / log (`~/Library/Logs/Mini/<device>.log`) |
-| ⌘Q | quit (Android shuts down first) |
-
-### Settings
-One option, applied the next time a device starts: **Kernel console and logcat** written next to the log (`<device>-kernel.log`, `<device>-logcat.log`). Otherwise they go nowhere.
-
-Frames are letterboxed and never stretched. Clicks are mapped back through the letterbox and the current rotation into panel coordinates. `swift test` covers that mapping.
+## How graphics work
+```
+app GLES ─▶ ANGLE (in the guest) ─▶ Vulkan ─▶ gfxstream guest driver ─▶ virtio-gpu
+  ─▶ QEMU virtio-gpu-rutabaga ─▶ rutabaga ─▶ gfxstream host ─▶ MoltenVK ─▶ Metal
+composer scanout ─▶ QEMU console ─▶ mini-display ─▶ POSIX shm ─▶ Mini's window
+```
+The tricky parts:
+- **GLES runs in the guest, not on the host.** gfxstream's host GLES decoder would need ANGLE's shader translator on macOS. So Mini sets `GuestVulkanOnly`, and the guest's own ANGLE turns GLES into Vulkan. The bootconfig must say `androidboot.hardwareegl=angle`. The default (`emulation`) crashes SurfaceFlinger.
+- **GLES 3.1 needs a private-API MoltenVK.** ANGLE only offers GLES 3.x if the device has `VK_EXT_provoking_vertex`, which MoltenVK only exposes when built with `MVK_USE_METAL_PRIVATE_API=1` (`scripts/build-moltenvk.sh`). Without it, every app gets GLES 2.0.
+- **No goldfish pipe.** Graphics go over virtio-gpu (`gltransport=virtio-gpu-asg`), and gralloc is minigbm. The image's default mapper needs `goldfish_address_space`, which upstream QEMU doesn't have.
+- **The display size has to reach the composer.** Mini passes it through QEMU into rutabaga's C interface (patches `qemu/0001`, `rutabaga_gfx/0001`). Without it, the composer assumes 1280×1024 and every atomic commit fails with "Plane must cover entire CRTC".
+- **Frames never touch the disk.** `mini-display` (patch 0003) copies each guest flush into a double buffer that Mini maps: rotated, into the half Mini isn't showing. It then names that half over a socket. The buffer is POSIX shm, because macOS writes a mapped file's dirty pages back to the SSD: that's gigabytes a minute at 60 fps. QEMU's own surfaces had the same problem through its memfd fallback (patch 0005).
+- **shm sizes round up to 16 KB pages.** QEMU splits the buffer by the size `fstat` reports. If Mini's frame size isn't page-aligned, every second frame starts at a slightly different offset, and the picture wraps sideways.
+- There's still one CPU copy per flush (the `shortcut:` in `ui/mini.c`). Zero-copy into a Metal texture is the next step if it shows up in profiles.
 
 ## Known limits
-- Graphics: guest GLES (3.1) runs on **ANGLE in the guest** over gfxstream Vulkan, and gfxstream renders it with **MoltenVK** on the host. Every guest flush is copied once on the CPU.
-- No camera, GPS or quick boot. Overview goes through `adb shell input` (QEMU has no key code for KEY_APPSELECT). On images without an Ethernet service, internet needs an adbd that allows root: Google APIs images do, Play Store and most GSI user builds don't.
-- The adb port (5555, `emulator-5554`) is fixed, so you can only run one device at a time.
+- One device at a time, since the adb port is fixed (5555).
+- No camera, GPS or quick boot.
+- Internet on the stock image needs `adb root`, which Google APIs images allow; Play Store and most GSI user builds don't.
+- Mini.app isn't ready to hand out yet: it lacks the Homebrew libraries' license texts and QEMU's GPL source offer.
+- GSI-derived images contain Google's vendor, so don't redistribute them.
+
+The icon's robot is based on the Android robot, which Google created and shares under [CC BY 3.0](https://creativecommons.org/licenses/by/3.0/).

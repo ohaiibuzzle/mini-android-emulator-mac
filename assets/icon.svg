@@ -1,0 +1,79 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <!-- A very small Android, measured. Regenerate Mini.icns with scripts/make-icon.sh. -->
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#FFF6DD"/>
+      <stop offset="1" stop-color="#FFD9A0"/>
+    </linearGradient>
+    <linearGradient id="wood" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#F7C948"/>
+      <stop offset="1" stop-color="#E0A92E"/>
+    </linearGradient>
+    <filter id="shadow" x="-10%" y="-10%" width="120%" height="130%">
+      <feDropShadow dx="0" dy="12" stdDeviation="14" flood-color="#000" flood-opacity="0.28"/>
+    </filter>
+  </defs>
+
+  <!-- macOS icon grid: an 824 px squircle-ish tile in a 1024 canvas -->
+  <rect x="100" y="100" width="824" height="824" rx="185" fill="url(#bg)" filter="url(#shadow)"/>
+
+  <!-- the ruler -->
+  <g transform="translate(512 700) rotate(-4)">
+    <rect x="-340" y="0" width="680" height="120" rx="14" fill="url(#wood)" stroke="#B9831C" stroke-width="6"/>
+    <g stroke="#6B4A0E" stroke-width="6" stroke-linecap="round">
+      <line x1="-300" y1="6" x2="-300" y2="62"/>
+      <line x1="-260" y1="6" x2="-260" y2="30"/>
+      <line x1="-220" y1="6" x2="-220" y2="30"/>
+      <line x1="-180" y1="6" x2="-180" y2="44"/>
+      <line x1="-140" y1="6" x2="-140" y2="30"/>
+      <line x1="-100" y1="6" x2="-100" y2="30"/>
+      <line x1="-60" y1="6" x2="-60" y2="62"/>
+      <line x1="-20" y1="6" x2="-20" y2="30"/>
+      <line x1="20" y1="6" x2="20" y2="30"/>
+      <line x1="60" y1="6" x2="60" y2="44"/>
+      <line x1="100" y1="6" x2="100" y2="30"/>
+      <line x1="140" y1="6" x2="140" y2="30"/>
+      <line x1="180" y1="6" x2="180" y2="62"/>
+      <line x1="220" y1="6" x2="220" y2="30"/>
+      <line x1="260" y1="6" x2="260" y2="30"/>
+      <line x1="300" y1="6" x2="300" y2="44"/>
+    </g>
+    <g font-family="Helvetica Neue, Helvetica, Arial, sans-serif" font-weight="700" font-size="34" fill="#6B4A0E" text-anchor="middle">
+      <text x="-300" y="104">0</text>
+      <text x="-60" y="104">1</text>
+      <text x="180" y="104">2</text>
+      <text x="290" y="104" font-size="28">cm</text>
+    </g>
+
+    <!-- the Android: half a centimetre tall, standing on the ruler, waving -->
+    <g transform="translate(-60 0) scale(0.52)" fill="#3DDC84">
+      <!-- legs -->
+      <rect x="-30" y="-62" width="22" height="58" rx="11"/>
+      <rect x="8" y="-62" width="22" height="58" rx="11"/>
+      <!-- body -->
+      <path d="M-56 -170 h112 v86 a24 24 0 0 1 -24 24 h-64 a24 24 0 0 1 -24 -24 z"/>
+      <!-- arms: left down, right up and waving -->
+      <rect x="-90" y="-170" width="26" height="86" rx="13"/>
+      <rect x="64" y="-252" width="26" height="86" rx="13" transform="rotate(28 77 -170)"/>
+      <!-- head -->
+      <path d="M-56 -180 a56 56 0 0 1 112 0 z"/>
+      <!-- antennae -->
+      <g stroke="#3DDC84" stroke-width="8" stroke-linecap="round">
+        <line x1="-28" y1="-222" x2="-44" y2="-250"/>
+        <line x1="28" y1="-222" x2="44" y2="-250"/>
+      </g>
+      <!-- eyes -->
+      <circle cx="-22" cy="-204" r="8" fill="#fff"/>
+      <circle cx="22" cy="-204" r="8" fill="#fff"/>
+      <!-- a nervous sweat drop -->
+      <path d="M70 -232 q12 18 0 26 q-12 -8 0 -26 z" fill="#7CC8F2"/>
+    </g>
+  </g>
+
+  <!-- speech bubble -->
+  <g transform="translate(560 420) scale(0.8)">
+    <path d="M-150 -86 h300 a40 40 0 0 1 40 40 v92 a40 40 0 0 1 -40 40 h-190 l-70 66 l14 -66 h-54 a40 40 0 0 1 -40 -40 v-92 a40 40 0 0 1 40 -40 z"
+          fill="#fff" stroke="#3A3A3A" stroke-width="10" stroke-linejoin="round"/>
+    <text x="10" y="32" font-family="Helvetica Neue, Helvetica, Arial, sans-serif" font-weight="800" font-size="88" fill="#3A3A3A" text-anchor="middle">hi!</text>
+  </g>
+</svg>
