@@ -18,6 +18,7 @@ let package = Package(
         .product(name: "GRPCNIOTransportHTTP2", package: "grpc-swift-nio-transport"),
       ],
       plugins: [.plugin(name: "GRPCProtobufGenerator", package: "grpc-swift-protobuf")]
-    )
+    ),
+    .testTarget(name: "MiniTests", dependencies: ["Mini"]),
   ]
 )

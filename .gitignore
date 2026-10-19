@@ -3,3 +3,4 @@ frontend/.swiftpm/
 # local reference captures, not shipped
 oracle/
 build/
+.DS_Store

@@ -14,16 +14,30 @@ cd frontend && swift build && .build/debug/Mini goldfish37   # dev: uses the SDK
 ```
 Requires `protoc` (`brew install protobuf`) at build time. `bundle.sh` pins a copy of the SDK emulator (~1.3 GB) into `build/Mini.app`, which is gitignored. That copy is for local use only, because the SDK license restricts redistributing it. System images and AVDs still come from the SDK (`ANDROID_HOME`, default `~/Library/Android/sdk`).
 
+**Pick the AVD** in Settings (⌘,) or pass it as the first argument. `goldfish37` is a phone (1080×2400). `freeform37` uses the "13.5in Freeform" profile: 2560×1440 landscape with freeform app windows enabled, though apps still open fullscreen until you move one into a window.
+
 **The AVD needs `hw.keyboard=yes`** in `~/.android/avd/<name>.avd/config.ini`, otherwise the guest has no keyboard device and keys are dropped. `avdmanager` defaults it to `no`.
 
 | Input | Action |
 |---|---|
 | click / drag | touch |
 | typing | keys (Mac keycodes → evdev) |
+| title bar | Back, Home, Overview, Rotate ⟲/⟳, Volume −/+, Power, Screenshot (saved to Desktop) |
 | ⌘⇧H / ⌘⌫ / ⌘O / ⌘P | Home / Back / Overview / Power |
+| ⌘, / ⌘L | Settings / emulator log (`~/Library/Logs/Mini/<avd>.log`) |
 | ⌘Q | quit (saves the quick-boot snapshot) |
 
-How it works: Mini launches `emulator -no-window -gpu host -feature GuestUsesAngle -grpc 8554 -grpc-use-token`, reads `grpc.token` from the emulator's discovery file, streams frames over gRPC into a shared mmap file (`ImageTransport.MMAP`), and sends input over one ordered `streamInputEvent` stream.
+### Settings
+They apply the next time the emulator starts. Anything that costs performance is off by default:
+- **OpenGL ES:** ANGLE in the guest (default) or the host desktop-GL translator.
+- **Audio** (`-no-audio` when off).
+- **Radios:** Bluetooth, UWB and the cellular modem. When off, these features are disabled and `netsimd` doesn't run. Wi-Fi always stays on because it's the guest's only route to the internet.
+- **Cameras** (`none` when off).
+- **Kernel console and logcat** in the emulator log. The serial console is otherwise `-serial null`.
+
+How it works: Mini launches `emulator -no-window -gpu host -grpc 8554 -grpc-use-token` plus the flags from Settings, reads `grpc.token` from the emulator's discovery file, streams frames over gRPC into a shared mmap file (`ImageTransport.MMAP`), and sends input over one ordered `streamInputEvent` stream.
+
+Frames are letterboxed and never stretched. Clicks are mapped back through the letterbox and the current rotation into panel coordinates. `swift test` covers that mapping.
 
 ## Known limits
 - Graphics: guest GLES (3.1) runs on **ANGLE in the guest** over gfxstream Vulkan, and gfxstream renders it with **MoltenVK** on the host. Host-side ANGLE would need a gfxstream source build that matches the emulator's exact commit, and 37.x source isn't public. The local `oracle/README.md` has the details.

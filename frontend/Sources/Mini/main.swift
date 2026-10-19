@@ -5,8 +5,12 @@ import GRPCNIOTransportHTTP2
 typealias EC = Android_Emulation_Control_EmulatorController
 typealias InputEvent = Android_Emulation_Control_InputEvent
 typealias KeyEvent = Android_Emulation_Control_KeyboardEvent
+typealias PhysicalModel = Android_Emulation_Control_PhysicalModelValue
 
-let avd = CommandLine.arguments.dropFirst().first ?? "goldfish37"
+/// Command-line AVD name, else the one picked in Settings, else the first AVD found.
+let avd = CommandLine.arguments.dropFirst().first { !$0.hasPrefix("-") }
+  ?? UserDefaults.standard.string(forKey: Prefs.avd).flatMap { $0.isEmpty ? nil : $0 }
+  ?? Prefs.avds().first ?? "goldfish37"
 let grpcPort = 8554
 let sdk = ProcessInfo.processInfo.environment["ANDROID_HOME"] ?? NSHomeDirectory() + "/Library/Android/sdk"
 /// Emulator bundled into Mini.app by scripts/bundle.sh, else the SDK's own install.
@@ -48,38 +52,117 @@ final class FrameBuffer: @unchecked Sendable {
 final class ScreenView: NSView {
   var deviceSize = CGSize(width: 1, height: 1)
   let inputs: AsyncStream<InputEvent>.Continuation
+  let rotations: AsyncStream<PhysicalModel>.Continuation
+  private var lastImage: CGImage?
+  private var angle: Float = 0
 
-  init(inputs: AsyncStream<InputEvent>.Continuation) {
+  init(inputs: AsyncStream<InputEvent>.Continuation, rotations: AsyncStream<PhysicalModel>.Continuation) {
     self.inputs = inputs
+    self.rotations = rotations
     super.init(frame: .zero)
     wantsLayer = true
-    layer?.contentsGravity = .resize
+    layer?.contentsGravity = .resizeAspect  // letterbox, never stretch (zoom / full screen)
     layer?.backgroundColor = .black
+    spinner.style = .spinning
+    spinner.controlSize = .large
+    spinner.appearance = NSAppearance(named: .darkAqua)  // visible on the black background
+    spinner.translatesAutoresizingMaskIntoConstraints = false
+    addSubview(spinner)
+    NSLayoutConstraint.activate([
+      spinner.centerXAnchor.constraint(equalTo: centerXAnchor), spinner.centerYAnchor.constraint(equalTo: centerYAnchor),
+    ])
+    spinner.startAnimation(nil)
+  }
+
+  /// Shown until the guest posts its first frame.
+  private let spinner = NSProgressIndicator()
+
+  /// Where the letterboxed frame sits inside the view.
+  private var imageRect: CGRect {
+    let s = min(bounds.width / deviceSize.width, bounds.height / deviceSize.height)
+    let size = CGSize(width: deviceSize.width * s, height: deviceSize.height * s)
+    return CGRect(x: (bounds.width - size.width) / 2, y: (bounds.height - size.height) / 2, width: size.width, height: size.height)
   }
   required init?(coder: NSCoder) { fatalError() }
 
   override var acceptsFirstResponder: Bool { true }
+  override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }  // a tap on an inactive window still taps
 
-  func show(_ image: CGImage) {
+  private var rotation = Android_Emulation_Control_Rotation.SkinRotation.portrait
+
+  func show(_ image: CGImage, rotation: Android_Emulation_Control_Rotation.SkinRotation) {
+    self.rotation = rotation
     deviceSize = CGSize(width: image.width, height: image.height)
+    if !spinner.isHidden {
+      spinner.stopAnimation(nil)
+      spinner.isHidden = true
+    }
     if let window, window.contentAspectRatio != deviceSize {
       window.contentAspectRatio = deviceSize
-      // Rotation: keep the window's height, swap to the new aspect.
-      let h = window.contentLayoutRect.height
-      window.setContentSize(CGSize(width: h * deviceSize.width / deviceSize.height, height: h))
+      // Rotation: keep the long side, shrink to fit the screen, stay centred where we were.
+      let old = window.frame
+      let visible = window.screen?.visibleFrame ?? old
+      let chrome = old.height - window.contentLayoutRect.height
+      let long = max(window.contentLayoutRect.width, window.contentLayoutRect.height)
+      let scale = min(
+        long / max(deviceSize.width, deviceSize.height), visible.width / deviceSize.width,
+        (visible.height - chrome) / deviceSize.height)
+      let size = CGSize(width: deviceSize.width * scale, height: deviceSize.height * scale + chrome)
+      var frame = CGRect(x: old.midX - size.width / 2, y: old.midY - size.height / 2, width: size.width, height: size.height)
+      frame.origin.x = min(max(frame.minX, visible.minX), visible.maxX - frame.width)
+      frame.origin.y = min(max(frame.minY, visible.minY), visible.maxY - frame.height)
+      window.setFrame(frame, display: true)
     }
     layer?.contents = image
+    lastImage = image
+  }
+
+  /// Turns the virtual device by `degrees` around the screen normal; the guest reorients like a real phone.
+  func rotate(by degrees: Float) {
+    angle = (angle + degrees + 360).truncatingRemainder(dividingBy: 360)
+    var m = PhysicalModel()
+    m.target = .rotation
+    m.value.data = [0, 0, angle]
+    rotations.yield(m)
+  }
+
+  func saveScreenshot() {
+    guard let image = lastImage else { return }
+    let stamp = ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: ".")
+    let url = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Desktop/\(avd) \(stamp).png")
+    guard let dest = CGImageDestinationCreateWithURL(url as CFURL, "public.png" as CFString, 1, nil) else { return }
+    CGImageDestinationAddImage(dest, image, nil)
+    if CGImageDestinationFinalize(dest) { NSSound(named: "Grab")?.play() }
   }
 
   private func touch(_ e: NSEvent, down: Bool) {
     let p = convert(e.locationInWindow, from: nil)
+    // (u, v): position in the displayed (rotated, letterboxed) frame, 0...1 from its top-left corner.
+    // Clamped so a drag that leaves the frame pins to its edge instead of jumping.
+    let r = imageRect
+    let u = min(max((p.x - r.minX) / r.width, 0), 1), v = min(max(1 - (p.y - r.minY) / r.height, 0), 1)
+    let panel = Self.panelPoint(u: u, v: v, displayed: deviceSize, rotation: rotation)
     var t = Android_Emulation_Control_Touch()
-    t.x = Int32((p.x / bounds.width * deviceSize.width).rounded())
-    t.y = Int32(((1 - p.y / bounds.height) * deviceSize.height).rounded())
+    t.x = Int32(panel.x.rounded())
+    t.y = Int32(panel.y.rounded())
     t.pressure = down ? 1 : 0
     var ev = InputEvent()
     ev.touchEvent.touches = [t]
     inputs.yield(ev)
+  }
+
+  /// Touches are in the unrotated panel's pixels, so undo the frame's rotation.
+  /// (u, v) is the point in the displayed frame, 0...1 from its top-left; `displayed` is that frame's pixel size.
+  nonisolated static func panelPoint(
+    u: CGFloat, v: CGFloat, displayed: CGSize, rotation: Android_Emulation_Control_Rotation.SkinRotation
+  ) -> CGPoint {
+    let swapped = CGSize(width: displayed.height, height: displayed.width)
+    switch rotation {
+    case .landscape: return CGPoint(x: (1 - v) * swapped.width, y: u * swapped.height)  // panel top edge on the left
+    case .reverseLandscape: return CGPoint(x: v * swapped.width, y: (1 - u) * swapped.height)
+    case .reversePortrait: return CGPoint(x: (1 - u) * displayed.width, y: (1 - v) * displayed.height)
+    default: return CGPoint(x: u * displayed.width, y: v * displayed.height)
+    }
   }
 
   override func mouseDown(with e: NSEvent) { touch(e, down: true) }
@@ -92,7 +175,8 @@ final class ScreenView: NSView {
     inputs.yield(ev)
   }
 
-  private func named(_ name: String) {
+  /// W3C key name, e.g. "GoBack", "GoHome", "AppSwitch", "Power", "AudioVolumeUp".
+  func named(_ name: String) {
     var k = KeyEvent()
     k.eventType = .keypress
     k.key = name
@@ -129,34 +213,42 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
   let emulator = Process()
   var window: NSWindow!
   var quitting = false
+  var buttonActions: [() -> Void] = []
+  let logURL = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Logs/Mini/\(avd).log")
 
   func applicationDidFinishLaunching(_ note: Notification) {
     emulator.executableURL = URL(fileURLWithPath: emulatorDir + "/emulator")
     // The bundled emulator lives outside the SDK; it still needs the SDK for system images.
     emulator.environment = ProcessInfo.processInfo.environment.merging(["ANDROID_SDK_ROOT": sdk]) { _, new in new }
-    // GuestUsesAngle: guest GLES runs on ANGLE over gfxstream Vulkan, which renders on MoltenVK.
-    emulator.arguments = [
-      "-avd", avd, "-no-window", "-gpu", "host", "-feature", "GuestUsesAngle",
-      "-grpc", "\(grpcPort)", "-grpc-use-token", "-no-boot-anim",
-    ]
+    emulator.arguments = Prefs.emulatorArgs(avd: avd, grpcPort: grpcPort)
+    try? FileManager.default.createDirectory(at: logURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+    if FileManager.default.createFile(atPath: logURL.path, contents: nil), let log = try? FileHandle(forWritingTo: logURL) {
+      emulator.standardOutput = log
+      emulator.standardError = log
+    }
     emulator.terminationHandler = { _ in DispatchQueue.main.async { NSApp.terminate(nil) } }
     do { try emulator.run() } catch { fatal("cannot launch emulator: \(error)") }
 
     let (inputs, inputsCont) = AsyncStream.makeStream(of: InputEvent.self)
-    let view = ScreenView(inputs: inputsCont)
+    let (rotations, rotationsCont) = AsyncStream.makeStream(of: PhysicalModel.self)
+    let view = ScreenView(inputs: inputsCont, rotations: rotationsCont)
     let screenH = (NSScreen.main?.visibleFrame.height ?? 900) * 0.85
     window = NSWindow(
       contentRect: CGRect(x: 0, y: 0, width: screenH * 9 / 20, height: screenH),
       styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
     window.title = avd
+    window.titleVisibility = .hidden  // the soft buttons need the room
     window.contentView = view
+    addSoftButtons(for: view)
     window.center()
     window.makeKeyAndOrderFront(nil)
     window.makeFirstResponder(view)
 
     Task.detached { [weak view, weak self] in
       do {
-        try await Self.run(inputs: inputs) { img in await MainActor.run { view?.show(img) } }
+        try await Self.run(inputs: inputs, rotations: rotations) { img, rot in
+          await MainActor.run { view?.show(img, rotation: rot) }
+        }
       } catch {
         // The stream always dies while we shut the emulator down; only alert on unexpected failures.
         await MainActor.run { if self?.quitting == false { fatal("gRPC: \(error)") } }
@@ -164,7 +256,45 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
   }
 
-  nonisolated static func run(inputs: AsyncStream<InputEvent>, onFrame: @escaping @Sendable (CGImage) async -> Void) async throws {
+  private func addSoftButtons(for view: ScreenView) {
+    let buttons: [(symbol: String, label: String, action: () -> Void)] = [
+      ("chevron.backward", "Back", { view.named("GoBack") }),
+      ("circle", "Home", { view.named("GoHome") }),
+      ("square", "Overview", { view.named("AppSwitch") }),
+      ("rotate.left", "Rotate left", { view.rotate(by: 90) }),
+      ("rotate.right", "Rotate right", { view.rotate(by: -90) }),
+      ("speaker.wave.1", "Volume down", { view.named("AudioVolumeDown") }),
+      ("speaker.wave.3", "Volume up", { view.named("AudioVolumeUp") }),
+      ("power", "Power", { view.named("Power") }),
+      ("camera", "Screenshot to Desktop", { view.saveScreenshot() }),
+    ]
+    buttonActions = buttons.map(\.action)
+    let stack = NSStackView(views: buttons.enumerated().map { i, b in
+      let button = NSButton(
+        image: NSImage(systemSymbolName: b.symbol, accessibilityDescription: b.label)!, target: self,
+        action: #selector(softButton(_:)))
+      button.isBordered = false
+      button.tag = i
+      button.toolTip = b.label
+      return button
+    })
+    stack.spacing = 10
+    stack.edgeInsets = NSEdgeInsets(top: 0, left: 0, bottom: 0, right: 10)
+    stack.frame.size = stack.fittingSize  // trailing accessories are sized by frame, not constraints
+    let accessory = NSTitlebarAccessoryViewController()
+    accessory.view = stack
+    accessory.layoutAttribute = .trailing
+    window.addTitlebarAccessoryViewController(accessory)
+  }
+
+  @objc func softButton(_ sender: NSButton) { buttonActions[sender.tag]() }
+  @objc func showSettings(_ sender: Any?) { SettingsWindow.show() }
+  @objc func showLog(_ sender: Any?) { NSWorkspace.shared.open(logURL) }
+
+  nonisolated static func run(
+    inputs: AsyncStream<InputEvent>, rotations: AsyncStream<PhysicalModel>,
+    onFrame: @escaping @Sendable (CGImage, Android_Emulation_Control_Rotation.SkinRotation) async -> Void
+  ) async throws {
     try await withGRPCClient(
       transport: .http2NIOPosix(target: .ipv4(address: "127.0.0.1", port: grpcPort), transportSecurity: .plaintext)
     ) { client in
@@ -201,10 +331,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             for await ev in inputs { try await writer.write(ev) }
           }
         }
+        group.addTask { [md] in
+          for await m in rotations { _ = try await ec.setPhysicalModel(m, metadata: md) }
+        }
         group.addTask { [md, fmt] in
           try await ec.streamScreenshot(fmt, metadata: md) { response in
             for try await img in response.messages {
-              if let cg = fb.image(width: Int(img.format.width), height: Int(img.format.height)) { await onFrame(cg) }
+              if let cg = fb.image(width: Int(img.format.width), height: Int(img.format.height)) {
+                await onFrame(cg, img.format.rotation.rotation)
+              }
             }
           }
         }
@@ -246,11 +381,16 @@ func grpcToken() -> String? {
   exit(1)
 }
 
+Prefs.register()
 let app = NSApplication.shared
 app.setActivationPolicy(.regular)
 let menu = NSMenu()
 let appItem = NSMenuItem()
 appItem.submenu = NSMenu()
+// nil targets go up the responder chain to the app delegate.
+appItem.submenu!.addItem(withTitle: "Settings…", action: #selector(AppDelegate.showSettings(_:)), keyEquivalent: ",")
+appItem.submenu!.addItem(withTitle: "Show Emulator Log", action: #selector(AppDelegate.showLog(_:)), keyEquivalent: "l")
+appItem.submenu!.addItem(.separator())
 appItem.submenu!.addItem(withTitle: "Quit Mini", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
 menu.addItem(appItem)
 app.mainMenu = menu
