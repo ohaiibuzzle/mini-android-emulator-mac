@@ -29,7 +29,7 @@ q=$app/Contents/Resources/qemu
 mkdir -p "$q/lib" "$q/licenses"
 cp -R "$root/third_party/install/bin" "$q/bin"
 chmod -R u+w "$q"
-find "$q/bin" -type f ! -name qemu-system-aarch64 ! -path "*/lib64/*" -delete  # qemu-img & co. aren't used
+find "$q/bin" -type f ! -name qemu-system-aarch64 ! -name qemu-img ! -path "*/lib64/*" -delete  # Mini makes qcow2 overlays with qemu-img
 relocate() {
   for dep in $(otool -L "$1" | tail -n +2 | awk '{print $1}' | grep -E '^/(opt|Users)/'); do
     name=${dep##*/}
@@ -42,6 +42,7 @@ relocate() {
   done
 }
 relocate "$q/bin/qemu-system-aarch64"
+relocate "$q/bin/qemu-img"
 cp "$root/third_party/qemu/COPYING" "$q/licenses/QEMU-COPYING.txt"
 cp "$root/third_party/gfxstream/LICENSE" "$q/licenses/gfxstream-LICENSE.txt"
 cp "$root/third_party/rutabaga_gfx/LICENSE" "$q/licenses/rutabaga_gfx-LICENSE.txt"
@@ -59,10 +60,11 @@ cat > "$app/Contents/Info.plist" <<PLIST
   <key>CFBundleShortVersionString</key><string>0.1</string>
   <key>LSMinimumSystemVersion</key><string>15.0</string>
   <key>NSHighResolutionCapable</key><true/>
+  <key>NSMicrophoneUsageDescription</key><string>Android apps on your devices can use the microphone.</string>
 </dict></plist>
 PLIST
 codesign --force -s - "$app/Contents/Resources/libMoltenVK.dylib"
-for f in "$q"/lib/* "$q"/bin/lib64/vulkan/*.dylib; do codesign --force -s - "$f"; done
+for f in "$q"/lib/* "$q"/bin/lib64/vulkan/*.dylib "$q/bin/qemu-img"; do codesign --force -s - "$f"; done
 # HVF refuses processes without the hypervisor entitlement.
 codesign --force -s - --entitlements "$root/third_party/qemu/accel/hvf/entitlements.plist" "$q/bin/qemu-system-aarch64"
 codesign --force -s - "$app"

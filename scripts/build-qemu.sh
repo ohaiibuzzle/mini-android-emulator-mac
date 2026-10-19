@@ -33,11 +33,11 @@ meson install -C build --quiet
 # --disable-pvg: hw/display/apple-gfx.m doesn't build against the macOS 27 SDK.
 cd "$tp/qemu"
 [ -d build-mini ] || (mkdir build-mini && cd build-mini && ../configure --target-list=aarch64-softmmu --without-default-features \
-  --enable-hvf --enable-rutabaga-gfx --enable-slirp --enable-coreaudio --audio-drv-list=coreaudio --enable-fdt=internal --enable-pixman --disable-pvg \
+  --enable-hvf --enable-rutabaga-gfx --enable-slirp --enable-coreaudio --audio-drv-list=coreaudio --enable-fdt=internal --enable-pixman --enable-tools --disable-pvg \
   --disable-docs --disable-werror --disable-debug-info)
-ninja -C build-mini qemu-system-aarch64
+ninja -C build-mini qemu-system-aarch64 qemu-img
 mkdir -p "$install/bin/lib64/vulkan"
-cp build-mini/qemu-system-aarch64 "$install/bin/"
+cp build-mini/qemu-system-aarch64 build-mini/qemu-img "$install/bin/"
 
 # gfxstream loads the Vulkan loader and ICD from <qemu dir>/lib64/vulkan: Mini's private-API MoltenVK behind Khronos' loader.
 "$root/scripts/build-moltenvk.sh"

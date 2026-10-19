@@ -239,6 +239,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         try emulator.run()
       } catch { fatal("cannot launch QEMU: \(error.localizedDescription)") }
       Task.detached { await GuestSetup.afterBoot(refreshHz: config.refreshHz) }
+      let profile = URL(fileURLWithPath: (Prefs.configPath(avd: avd) as NSString).deletingLastPathComponent)
+        .appendingPathComponent("modem_simulator/iccprofile_for_sim0.xml")
+      Task.detached { try? await Modem.run(socket: socketPath + ".modem", profile: profile) }
     } else {
       fb = nil
       launchEmulator()
@@ -404,21 +407,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     fb: FrameBuffer, socket path: String, inputs: AsyncStream<InputEvent>, rotations: AsyncStream<PhysicalModel>,
     onFrame: @escaping @Sendable (CGImage, Android_Emulation_Control_Rotation.SkinRotation) async -> Void
   ) async throws {
-    // QEMU creates the socket a moment after launch.
-    var fd: Int32 = -1
-    while fd < 0 {
-      fd = socket(AF_UNIX, SOCK_STREAM, 0)
-      var addr = sockaddr_un()
-      addr.sun_family = sa_family_t(AF_UNIX)
-      withUnsafeMutableBytes(of: &addr.sun_path) { _ = path.utf8CString.withUnsafeBytes($0.copyMemory(from:)) }
-      let ok = withUnsafePointer(to: &addr) { $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { connect(fd, $0, socklen_t(MemoryLayout<sockaddr_un>.size)) } }
-      if ok != 0 {
-        close(fd)
-        fd = -1
-        try await Task.sleep(for: .milliseconds(200))
-      }
-    }
-    let link = FileHandle(fileDescriptor: fd, closeOnDealloc: true)
+    let link = try await Qemu.connect(path)
+    unlink(fb.path)  // QEMU mapped it before it took connections; nothing is left behind if Mini dies
     try await withThrowingTaskGroup(of: Void.self) { group in
       group.addTask {
         for await ev in inputs { for msg in MiniMsg.encode(ev) { try link.write(contentsOf: msg) } }

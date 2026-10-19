@@ -9,6 +9,7 @@ enum Qemu {
       ?? URL(fileURLWithPath: #filePath).deletingLastPathComponent().appendingPathComponent("../../../third_party/install").standardized.path
   }
   static var binary: String { root + "/bin/qemu-system-aarch64" }
+  static var qemuImg: String { root + "/bin/qemu-img" }
   static var installed: Bool { FileManager.default.isExecutableFile(atPath: binary) }
   static let mke2fs = "/opt/homebrew/opt/e2fsprogs/sbin/mke2fs"
   static let adbPort = 5555  // adb names it emulator-5554, like the emulator's first instance
@@ -61,20 +62,26 @@ enum Qemu {
 
   /// The emulator's disks if it made them, else fresh ones, as vda...vde: vendor, metadata key, userdata, cache, system.
   /// (virtio-mmio slots fill from the top, which puts system at a003600, what androidboot.boot_devices names.)
+  /// Writable disks are the emulator's layout too: a sparse raw base and a qcow2 overlay on it, which savevm needs.
   static func disks(dir: String, sysdir: String, storageMB: Int) throws -> [(path: String, readOnly: Bool)] {
     let fm = FileManager.default
-    func pick(_ names: [String], create: (String) throws -> Void) throws -> String {
-      if let have = names.map({ "\(dir)/\($0)" }).first(where: fm.fileExists(atPath:)) { return have }
-      try create("\(dir)/\(names.last!)")
-      return "\(dir)/\(names.last!)"
+    func overlay(_ name: String, create: (String) throws -> Void) throws -> String {
+      let base = "\(dir)/\(name)", top = base + ".qcow2"
+      if fm.fileExists(atPath: top) { return top }
+      if !fm.fileExists(atPath: base) { try create(base) }
+      try run(qemuImg, ["create", "-q", "-f", "qcow2", "-F", "raw", "-b", name, top])  // backing path relative to top
+      return top
     }
-    let key = try pick(["encryptionkey.img.qcow2", "encryptionkey.img"]) { try fm.copyItem(atPath: sysdir + "encryptionkey.img", toPath: $0) }
-    let data = try pick(["userdata-qemu.img.qcow2", "userdata-qemu.img"]) { path in
+    let key = try overlay("encryptionkey.img") { try fm.copyItem(atPath: sysdir + "encryptionkey.img", toPath: $0) }
+    let data = try overlay("userdata-qemu.img") { path in
       // /data isn't formattable in fstab.ranchu, so it must start as ext4; the image's data/ seeds it like the emulator does.
+      // The new file is sparse, so it is already zero: skip zeroing inode tables here and in the guest's ext4lazyinit,
+      // which otherwise writes gigabytes and stalls the guest on a large disk.
       guard fm.isExecutableFile(atPath: mke2fs) else { throw SetupError("A new device on QEMU needs e2fsprogs: brew install e2fsprogs") }
-      try run(mke2fs, ["-q", "-F", "-t", "ext4", "-L", "data", "-d", sysdir + "data", path, "\(storageMB)M"])
+      try run(mke2fs, ["-q", "-F", "-t", "ext4", "-L", "data", "-E", "lazy_itable_init=0,lazy_journal_init=0,assume_storage_prezeroed=1",
+                       "-d", sysdir + "data", path, "\(storageMB)M"])
     }
-    let cache = try pick(["cache.img.qcow2", "cache.img"]) { path in
+    let cache = try overlay("cache.img") { path in
       // Not mounted (fstab.ranchu has no /cache); it only holds the slot.
       guard fm.createFile(atPath: path, contents: nil), let h = FileHandle(forWritingAtPath: path) else { throw SetupError("cannot create \(path)") }
       try h.truncate(atOffset: 66 << 20)
@@ -90,6 +97,20 @@ enum Qemu {
     try p.run()
     p.waitUntilExit()
     guard p.terminationStatus == 0 else { throw SetupError("\((exe as NSString).lastPathComponent) failed (\(p.terminationStatus))") }
+  }
+
+  /// Connects to one of QEMU's unix socket chardevs, which appear a moment after launch.
+  static func connect(_ path: String) async throws -> FileHandle {
+    while true {
+      let fd = socket(AF_UNIX, SOCK_STREAM, 0)
+      var addr = sockaddr_un()
+      addr.sun_family = sa_family_t(AF_UNIX)
+      withUnsafeMutableBytes(of: &addr.sun_path) { _ = path.utf8CString.withUnsafeBytes($0.copyMemory(from:)) }
+      let ok = withUnsafePointer(to: &addr) { $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { Darwin.connect(fd, $0, socklen_t(MemoryLayout<sockaddr_un>.size)) } }
+      if ok == 0 { return FileHandle(fileDescriptor: fd, closeOnDealloc: true) }
+      close(fd)
+      try await Task.sleep(for: .milliseconds(200))
+    }
   }
 
   /// Writes the initrd and readies the disks; returns QEMU's command line.
@@ -121,21 +142,27 @@ enum Qemu {
       "-serial", d.bool(forKey: Prefs.debugLogs) ? "file:\(log)-kernel.log" : "null",
     ]
     for (i, disk) in try disks(dir: dir, sysdir: sysdir, storageMB: config.storageMB).enumerated() {
-      let qcow = (try? FileHandle(forReadingFrom: URL(fileURLWithPath: disk.path)).read(upToCount: 4)) == Data([0x51, 0x46, 0x49, 0xfb])  // "QFI\xfb"
-      args += ["-drive", "if=none,id=d\(i),file=\(disk.path),format=\(qcow ? "qcow2" : "raw"),read-only=\(disk.readOnly ? "on" : "off")",
+      // Writable disks are qcow2 overlays; trimmed or zeroed guest blocks give their clusters back.
+      let opts = disk.readOnly ? "format=raw,read-only=on" : "format=qcow2,discard=unmap,detect-zeroes=unmap"
+      args += ["-drive", "if=none,id=d\(i),file=\(disk.path),\(opts)",
                "-device", "virtio-blk-device,drive=d\(i)"]
     }
     args += [
       "-netdev", "user,id=net", "-device", "virtio-net-device,netdev=net", "-device", "virtio-rng-device",
       "-chardev", "null,id=hvc0", "-chardev", d.bool(forKey: Prefs.debugLogs) ? "file,id=hvc1,path=\(log)-logcat.log" : "null,id=hvc1",
       "-device", "virtio-serial-pci", "-device", "virtconsole,chardev=hvc0", "-device", "virtconsole,chardev=hvc1",
+      // Port 2 of virtio-serial, which the guest numbers vport7 after the seven virtio-mmio devices above.
+      "-chardev", "socket,id=modem,path=\(socket).modem,server=on,wait=off", "-device", "virtserialport,chardev=modem,name=modem",
       "-device", "virtio-keyboard-pci", "-device", "virtio-multitouch-pci",
+      // One output and one input stream; the ranchu audio HAL drives them through virtio_snd.
+      "-audiodev", "coreaudio,id=snd", "-device", "virtio-sound-pci,audiodev=snd",
       // GuestVulkanOnly: guest ANGLE draws everything through Vulkan, so the host needs no GLES (no EGL on macOS).
       "-device", "virtio-gpu-rutabaga-pci,gfxstream-vulkan=on,x-gfxstream-gles=on,x-gfxstream-composer=on,hostmem=1G,"
         + "x-gfxstream-features=GuestVulkanOnly:enabled,xres=\(config.size.width),yres=\(config.size.height)",
       "-chardev", "socket,id=adb,host=127.0.0.1,port=\(adbPort),server=on,wait=off",
       // sensors=1: the accelerometer, which mini-display tilts when Mini rotates.
-      "-device", "android-vsock-pci,guest-cid=3,adb=adb,sensors=1,boot-props=qemu.sf.lcd_density=\(config.size.density);qemu.hw.mainkeys=0",
+      "-device", "android-vsock-pci,guest-cid=3,adb=adb,sensors=1,boot-props=qemu.sf.lcd_density=\(config.size.density);qemu.hw.mainkeys=0;"
+        + "vendor.qemu.vport.modem=/dev/vport7p2",
       "-chardev", "socket,id=mini,path=\(socket),server=on,wait=off",
       "-object", "mini-display,id=display,chardev=mini,shm=\(shm)",
     ]
