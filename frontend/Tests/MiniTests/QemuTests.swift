@@ -21,7 +21,17 @@ import Testing
   let kv = Dictionary(uniqueKeysWithValues: Qemu.bootconfig(
     avd: "p", config: c, vbmeta: ["androidboot.vbmeta.size=6784", "bogus"], adbKey: nil, logcat: false))
   #expect(kv["vbmeta.size"] == "6784" && kv["qemu.skin"] == "1080x2400" && kv["qemu.display.settings.xml"] == "freeform")
-  #expect(kv["hardware.gltransport"] == "virtio-gpu-asg" && kv["qemu.adb.pubkey"] == nil)
+  #expect(kv["hardware.gltransport"] == "virtio-gpu-asg" && kv["qemu.adb.pubkey"] == nil && kv["hardwareegl"] == "angle")
+}
+
+@Test func hostGLESSwitchesTheGuestDriverAndHostRenderer() {
+  var c = DeviceConfig()
+  c.hostGLES = true
+  let kv = Dictionary(uniqueKeysWithValues: Qemu.bootconfig(avd: "p", config: c, vbmeta: [], adbKey: nil, logcat: false))
+  #expect(kv["hardwareegl"] == "emulation")
+  let env = Qemu.environment(hostGLES: true)
+  #expect(env["ANDROID_EMU_RENDERER"] == "host" && env["DYLD_FALLBACK_LIBRARY_PATH"] == Qemu.root + "/lib")
+  #expect(Qemu.environment(hostGLES: false)["DYLD_FALLBACK_LIBRARY_PATH"] == nil)
 }
 
 @Test func miniMessagesAreSixteenLittleEndianBytes() {

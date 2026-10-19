@@ -7,7 +7,7 @@ A macOS (Apple Silicon) front-end that boots Google's goldfish/ranchu Android im
 - `frontend/Sources/CShm/`: a C shim, because Swift can't call the variadic `shm_open`.
 - `patches/qemu/000N-*.patch`, `patches/rutabaga_gfx/`: our changes to the third-party trees.
 - `third_party/` (git-ignored): `qemu`, `gfxstream`, `rutabaga_gfx` checkouts, plus `install/` (the built engine).
-- `scripts/`: `build-qemu.sh` (engine + MoltenVK), `bundle.sh` (→ `build/Mini.app`), `build-mini.sh [device]` (rebundle and relaunch), `gsi-image.py` (GSI import, bundled into the app).
+- `scripts/`: `build-qemu.sh` (engine + MoltenVK), `bundle.sh` (→ `build/Mini.app`), `build-mini.sh [device]` (rebundle and relaunch), `gsi-image.py` (GSI import, bundled into the app), `build-shadertranslator.sh` (CI only, see below).
 - `assets/`: the app icon (`icon.svg`, rendered into the committed `Mini.icns` by `scripts/make-icon.sh`).
 - Runtime data lives in `~/Library/Application Support/Mini`: `platform-tools/`, `system-images/` (SDK layout), and `Devices/<name>/` (`config.ini` in the emulator's keys, the qcow2 overlays, `initrd-mini`). Logs go to `~/Library/Logs/Mini/<device>.log`.
 
@@ -36,6 +36,7 @@ third_party/qemu/build-mini/pyvenv/bin/meson configure third_party/qemu/build-mi
 - **`/dev/vport7pN` names depend on device order**: the seven virtio-mmio disks/net/rng come first, then the virtio-serial ports. Adding or reordering devices renumbers them, and the boot-props in `Qemu.arguments` must follow.
 - **`adb shell svc power shutdown` returns failure on success**, because the guest drops the connection. Never read its result as "the guest didn't get it".
 - **Data disks are made pre-zeroed** (`mke2fs -E lazy_itable_init=0,lazy_journal_init=0,assume_storage_prezeroed=1`). Without this, the guest's ext4lazyinit writes the whole disk and stalls boot.
+- **Host GLES needs `libshadertranslator.dylib`, and it's never built on a dev machine.** CI's `shadertranslator` job builds it. To bundle it locally, download that artifact into `build/shadertranslator/`. Without it, `bundle.sh` warns and the OpenGL ES picker stays on ANGLE. Its header (`third_party/angle-st`) and the dylib come from the same pinned AOSP ANGLE revision, so they must stay matched.
 - When a fix is a known shortcut, mark it with a `shortcut: <limit>, <when to upgrade>` comment; the codebase uses these as its debt list.
 
 ## Licensing (hard rules)

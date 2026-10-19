@@ -21,8 +21,14 @@ fetch gfxstream https://github.com/utzcoz/gfxstream.git e9eed53d
 fetch rutabaga_gfx https://github.com/magma-gpu/rutabaga_gfx.git 60603af
 fetch qemu https://gitlab.com/qemu-project/qemu.git v11.1.2
 
+# Host GLES (devices set to "Host translator"): USE_ANGLE_SHADER_PARSER makes the GLES translator compile guest shaders through
+# ANGLE's libshadertranslator (built by CI: build-shadertranslator.sh); without it every shader fails. QEMU_NEXT posts frames
+# from gfxstream's own worker; without it, macOS posts only on a UI thread, which QEMU doesn't run, and compose deadlocks.
+"$root/scripts/build-shadertranslator.sh" header
+gles_args="-DUSE_ANGLE_SHADER_PARSER=1 -DQEMU_NEXT -I$tp/angle-st"
 cd "$tp/gfxstream"
 [ -d build ] || meson setup build --buildtype=release --prefix="$install" -Dgfxstream-build=host -Ddecoders=gles,vulkan,composer
+meson configure build -Dcpp_args="$gles_args"  # also for build dirs made before these flags
 meson install -C build --quiet
 
 cd "$tp/rutabaga_gfx"

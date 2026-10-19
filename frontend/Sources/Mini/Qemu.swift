@@ -12,6 +12,19 @@ enum Qemu {
   static var qemuImg: String { root + "/bin/qemu-img" }
   static var installed: Bool { FileManager.default.isExecutableFile(atPath: binary) }
   static let mke2fs = "/opt/homebrew/opt/e2fsprogs/sbin/mke2fs"
+  /// ANGLE's GLSL translator, which gfxstream's host GLES decoder dlopens. CI builds it; bundle.sh copies it if it's there.
+  static var shaderTranslator: String { root + "/lib/libshadertranslator.dylib" }
+  static var hostGLESAvailable: Bool { FileManager.default.fileExists(atPath: shaderTranslator) }
+
+  /// QEMU's environment. Host GLES needs two things gfxstream only reads from it.
+  static func environment(hostGLES: Bool) -> [String: String] {
+    var env = ProcessInfo.processInfo.environment.merging(["ANDROID_EMU_VK_ICD": "moltenvk"]) { _, new in new }
+    if hostGLES {
+      env["ANDROID_EMU_RENDERER"] = "host"  // otherwise it sets GL up as for SwiftShader: a GL 2.1 context, GLES 2 at most
+      env["DYLD_FALLBACK_LIBRARY_PATH"] = (shaderTranslator as NSString).deletingLastPathComponent  // dlopened by bare name
+    }
+    return env
+  }
   static let adbPort = 5555  // adb names it emulator-5554, like the emulator's first instance
 
   /// What the emulator's bootconfig says, with graphics moved from goldfish_pipe to virtio-gpu (gfxstream ASG) and
@@ -25,7 +38,8 @@ enum Qemu {
       ("hardware.gltransport", "virtio-gpu-asg"),
       ("hardware.gralloc", "minigbm"),
       ("hardware.vulkan", "ranchu"),
-      ("hardwareegl", "angle"),  // vendor init copies it to ro.hardware.egl; the default "emulation" needs goldfish_pipe
+      // Vendor init copies it to ro.hardware.egl. "emulation" is goldfish's GLES driver, streaming to the host decoder.
+      ("hardwareegl", config.hostGLES ? "emulation" : "angle"),
       ("opengles.version", "196609"),
       ("qemu", "1"),
       ("qemu.avd_name", avd),
@@ -116,7 +130,8 @@ enum Qemu {
   /// Writes the initrd and readies the disks; returns QEMU's command line.
   static func arguments(avd: String, socket: String, shm: String, log: String) throws -> [String] {
     let ini = Prefs.ini(try String(contentsOfFile: Prefs.configPath(avd: avd), encoding: .utf8))
-    let config = DeviceConfig(ini)
+    var config = DeviceConfig(ini)
+    config.hostGLES = config.hostGLES && hostGLESAvailable
     let dir = (Prefs.configPath(avd: avd) as NSString).deletingLastPathComponent
     let sysdir = Prefs.home + "/" + config.sysdir
     let d = UserDefaults.standard
@@ -155,9 +170,11 @@ enum Qemu {
       "-device", "virtio-keyboard-pci", "-device", "virtio-multitouch-pci",
       // One output and one input stream; the ranchu audio HAL drives them through virtio_snd.
       "-audiodev", "coreaudio,id=snd", "-device", "virtio-sound-pci,audiodev=snd",
-      // GuestVulkanOnly: guest ANGLE draws everything through Vulkan, so the host needs no GLES (no EGL on macOS).
+      // GuestVulkanOnly: guest ANGLE draws everything through Vulkan, so the host needs no GLES. Without it, guest GLES goes
+      // to gfxstream's translator on Apple's OpenGL 4.1 (GLES 3.0); Vulkan takes the same path either way.
       "-device", "virtio-gpu-rutabaga-pci,gfxstream-vulkan=on,x-gfxstream-gles=on,x-gfxstream-composer=on,hostmem=1G,"
-        + "x-gfxstream-features=GuestVulkanOnly:enabled,xres=\(config.size.width),yres=\(config.size.height)",
+        + (config.hostGLES ? "" : "x-gfxstream-features=GuestVulkanOnly:enabled,")
+        + "xres=\(config.size.width),yres=\(config.size.height)",
       "-chardev", "socket,id=adb,host=127.0.0.1,port=\(adbPort),server=on,wait=off",
       // sensors=1: the accelerometer, which mini-display tilts when Mini rotates.
       "-device", "android-vsock-pci,guest-cid=3,adb=adb,sensors=1,boot-props=qemu.sf.lcd_density=\(config.size.density);qemu.hw.mainkeys=0;"

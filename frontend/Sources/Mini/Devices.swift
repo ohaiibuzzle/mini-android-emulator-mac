@@ -34,6 +34,7 @@ struct DeviceConfig: Equatable {
   var storageMB = 6144  // userdata; a new size only applies to a freshly made data disk
   var freeform = false
   var refreshHz = 60
+  var hostGLES = false  // GLES on gfxstream's host translator instead of guest ANGLE
   var sysdir = BaseImage.sysdir  // read-only after creation
 
   static let refreshChoices = [60, 90, 120]
@@ -47,6 +48,7 @@ struct DeviceConfig: Equatable {
     storageMB = ini["disk.dataPartition.size"].flatMap { Self.megabytes($0, bare: 1) } ?? storageMB
     freeform = ini["display.settings.xml"] == "freeform"
     refreshHz = ini["hw.lcd.vsync"].flatMap(Int.init) ?? refreshHz
+    hostGLES = ini["mini.gles"] == "host"
     sysdir = ini["image.sysdir.1"] ?? sysdir
   }
 
@@ -69,6 +71,7 @@ struct DeviceConfig: Equatable {
       // Becomes androidboot.qemu.display.settings.xml; Google's provisioning app enables desktop windows.
       "display.settings.xml": freeform ? "freeform" : nil,
       "hw.lcd.vsync": "\(refreshHz)",  // the guest display's only mode; Mini lifts Android's 60 Hz default cap after boot
+      "mini.gles": hostGLES ? "host" : nil,  // Mini's own key: the emulator has no such choice
     ]
   }
 
@@ -261,6 +264,7 @@ struct DevicesView: View {
           ForEach(DeviceConfig.refreshChoices, id: \.self) { Text("\($0) Hz").tag($0) }
           if !DeviceConfig.refreshChoices.contains(config.refreshHz) { Text("\(config.refreshHz) Hz").tag(config.refreshHz) }
         }
+        GLESPicker(hostGLES: $config.hostGLES)
       }
       Section {
         HStack {
@@ -374,6 +378,7 @@ struct NewDeviceView: View {
       }
       .onChange(of: config.size) { config.freeform = config.size == DisplaySize.presets[2].1 }
       Toggle("Desktop windowing (freeform)", isOn: $config.freeform)
+      GLESPicker(hostGLES: $config.hostGLES)
       TextField("Memory (MB)", value: $config.ramMB, format: .number.grouping(.never))
       TextField("Storage (MB)", value: $config.storageMB, format: .number.grouping(.never))
       if let error { Text(error).font(.caption).foregroundStyle(.red).textSelection(.enabled) }
@@ -442,5 +447,22 @@ enum DevicesWindow {
     }
     window?.center()
     window?.makeKeyAndOrderFront(nil)
+  }
+}
+
+/// Who runs an app's OpenGL ES. Vulkan always goes through gfxstream to MoltenVK.
+struct GLESPicker: View {
+  @Binding var hostGLES: Bool
+
+  var body: some View {
+    Picker("OpenGL ES", selection: $hostGLES) {
+      Text("ANGLE on Vulkan (ES 3.1)").tag(false)
+      Text("Host translator (ES 3.0)").tag(true)
+    }
+    .disabled(!Qemu.hostGLESAvailable && !hostGLES)
+    Text(Qemu.hostGLESAvailable
+      ? "Try the host translator if a GLES app draws wrong under ANGLE."
+      : "This build of Mini lacks the host translator (libshadertranslator), so devices use ANGLE.")
+      .font(.caption).foregroundStyle(.secondary)
   }
 }

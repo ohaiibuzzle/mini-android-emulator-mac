@@ -42,6 +42,14 @@ cp "$root/third_party/qemu/COPYING" "$q/licenses/QEMU-COPYING.txt"
 cp "$root/third_party/gfxstream/LICENSE" "$q/licenses/gfxstream-LICENSE.txt"
 cp "$root/third_party/rutabaga_gfx/LICENSE" "$q/licenses/rutabaga_gfx-LICENSE.txt"
 cp "$root/build/moltenvk/LICENSE" "$q/licenses/MoltenVK-LICENSE.txt"
+# ANGLE's shader translator, for "Host translator" devices. CI builds it; it isn't built here (build-shadertranslator.sh).
+st=$root/build/shadertranslator
+if [ -f "$st/libshadertranslator.dylib" ]; then
+  cp "$st/libshadertranslator.dylib" "$q/lib/"
+  cp "$st/LICENSE" "$q/licenses/ANGLE-LICENSE.txt"
+else
+  echo "bundle: no build/shadertranslator (the CI artifact), so Mini.app can't run GLES on the host" >&2
+fi
 # shortcut: the Homebrew libraries' own license texts (glib/gettext LGPL, pixman MIT, slirp & pcre2 BSD) aren't copied;
 # add them before handing Mini.app to anyone, along with where to get QEMU's source (GPL).
 

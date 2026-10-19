@@ -21,6 +21,7 @@ import Testing
   c.storageMB = 16384
   c.refreshHz = 120
   c.freeform = true
+  c.hostGLES = true
   let text = Prefs.ini("image.sysdir.1=\(BaseImage.sysdir)\n", setting: c.values)
   #expect(DeviceConfig(Prefs.ini(text)) == c)
   #expect(c.valid)

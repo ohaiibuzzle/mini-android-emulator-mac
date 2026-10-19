@@ -31,7 +31,11 @@ app GLES ─▶ ANGLE (in the guest) ─▶ Vulkan ─▶ gfxstream guest driver
 composer scanout ─▶ QEMU console ─▶ mini-display ─▶ POSIX shm ─▶ Mini's window
 ```
 The tricky parts:
-- **GLES runs in the guest, not on the host.** gfxstream's host GLES decoder would need ANGLE's shader translator on macOS. So Mini sets `GuestVulkanOnly`, and the guest's own ANGLE turns GLES into Vulkan. The bootconfig must say `androidboot.hardwareegl=angle`. The default (`emulation`) crashes SurfaceFlinger.
+- **GLES runs in the guest by default.** Mini sets `GuestVulkanOnly`, and the guest's own ANGLE turns GLES into Vulkan, so the bootconfig says `androidboot.hardwareegl=angle`.
+- **Or on the host, per device** (Settings → OpenGL ES → Host translator), for apps ANGLE draws wrong. Then guest GLES streams to gfxstream's old GLES translator, which runs on Apple's OpenGL 4.1 (so GLES 3.0 at most). Vulkan still goes through gfxstream either way. Getting there took three things:
+  - `hardwareegl=emulation`, plus `ANDROID_EMU_RENDERER=host` (otherwise gfxstream sets GL up like it does for SwiftShader: a GL 2.1 context).
+  - ANGLE's shader translator. gfxstream is built with `USE_ANGLE_SHADER_PARSER` and `dlopen`s `libshadertranslator.dylib`. CI builds that library from AOSP's ANGLE (`scripts/build-shadertranslator.sh`).
+  - `QEMU_NEXT`. Without it, gfxstream on macOS posts frames only on a UI thread, which QEMU doesn't have, and the guest freezes at the first compose.
 - **GLES 3.1 needs a private-API MoltenVK.** ANGLE only offers GLES 3.x if the device has `VK_EXT_provoking_vertex`, which MoltenVK only exposes when built with `MVK_USE_METAL_PRIVATE_API=1` (`scripts/build-moltenvk.sh`). Without it, every app gets GLES 2.0.
 - **No goldfish pipe.** Graphics go over virtio-gpu (`gltransport=virtio-gpu-asg`), and gralloc is minigbm. The image's default mapper needs `goldfish_address_space`, which upstream QEMU doesn't have.
 - **The display size has to reach the composer.** Mini passes it through QEMU into rutabaga's C interface (patches `qemu/0001`, `rutabaga_gfx/0001`). Without it, the composer assumes 1280×1024 and every atomic commit fails with "Plane must cover entire CRTC".

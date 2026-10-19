@@ -1,4 +1,4 @@
-# Builds the parts Mini ships (private-API MoltenVK + the Swift app) into an unsigned Mini.app.
+# Builds the parts Mini ships (private-API MoltenVK, ANGLE's shader translator, the Swift app) into an unsigned Mini.app.
 # Google's adb and system images are not built or bundled: Mini downloads them.
 name: build
 on:
@@ -31,8 +31,31 @@ jobs:
             build/moltenvk/Package/Release/MoltenVK/dynamic/dylib/macOS/libMoltenVK.dylib
           if-no-files-found: error
 
+  # ANGLE's shader translator for "Host translator" devices. Built only here, never on a dev machine: download this artifact
+  # into build/shadertranslator to bundle it locally.
+  shadertranslator:
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v7
+      - id: cache
+        uses: actions/cache@v6
+        with:
+          path: |
+            build/shadertranslator/LICENSE
+            build/shadertranslator/libshadertranslator.dylib
+          key: shadertranslator-${{ hashFiles('scripts/build-shadertranslator.sh') }}
+      - if: steps.cache.outputs.cache-hit != 'true'
+        run: scripts/build-shadertranslator.sh
+      - uses: actions/upload-artifact@v7
+        with:
+          name: shadertranslator
+          path: |
+            build/shadertranslator/LICENSE
+            build/shadertranslator/libshadertranslator.dylib
+          if-no-files-found: error
+
   app:
-    needs: moltenvk
+    needs: [moltenvk, shadertranslator]
     runs-on: macos-26
     steps:
       - uses: actions/checkout@v7
@@ -41,6 +64,10 @@ jobs:
         with:
           name: moltenvk
           path: build/moltenvk
+      - uses: actions/download-artifact@v8
+        with:
+          name: shadertranslator
+          path: build/shadertranslator
       - run: scripts/bundle.sh  # finds the downloaded MoltenVK, so it skips rebuilding it
       - run: ditto -c -k --keepParent build/Mini.app build/Mini.zip  # keeps symlinks and signatures
       - uses: actions/upload-artifact@v7

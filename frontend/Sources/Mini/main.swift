@@ -230,7 +230,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     do {
       fb = try FrameBuffer(maxSide: max(config.size.width, config.size.height), count: 2)
       qemu.executableURL = URL(fileURLWithPath: Qemu.binary)
-      qemu.environment = ProcessInfo.processInfo.environment.merging(["ANDROID_EMU_VK_ICD": "moltenvk"]) { _, new in new }
+      qemu.environment = Qemu.environment(hostGLES: config.hostGLES && Qemu.hostGLESAvailable)
       qemu.arguments = try Qemu.arguments(avd: avd, socket: socketPath, shm: fb.path, log: logURL.deletingPathExtension().path)
       try qemu.run()
     } catch { fatal("cannot launch QEMU: \(error.localizedDescription)") }
