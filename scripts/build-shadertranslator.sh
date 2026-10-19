@@ -22,29 +22,55 @@ out=$root/build/shadertranslator
 [ -f "$out/libshadertranslator.dylib" ] && exit 0
 src=$out/angle
 rm -rf "$src" "$out/build"
-mkdir -p "$src"
+mkdir -p "$src/src"
 # Only the translator's subtrees, as gitiles tarballs: a full ANGLE checkout is gigabytes.
-for d in include src/common src/compiler src/third_party/compiler src/libShaderTranslator; do
+for d in include src/common src/compiler src/libShaderTranslator; do
   mkdir -p "$src/$d"
   curl -sfL "$repo/+archive/$rev/$d.tar.gz" | tar -xzf - -C "$src/$d"
 done
-file CMakeLists.txt > "$src/CMakeLists.txt"  # the emulator's: targets only, no project()
+for f in src/compiler.gni src/libGLESv2.gni; do file $f > "$src/$f"; done
 file LICENSE > "$out/LICENSE"
+
+# The emulator builds GN's "shadertranslator" target; this tree's CMakeLists.txt is years stale. So the sources come from
+# ANGLE's own .gni lists: the same pieces as its translator_aemu (ESSL + GLSL output, Apple workarounds), minus the
+# Vulkan/Metal/HLSL backends, which only add SPIR-V and glslang.
+python3 -I - "$src" > "$out/sources.cmake" <<'EOF'
+import os, re, sys
+src = sys.argv[1]
+lists = {}
+for gni in ("src/compiler.gni", "src/libGLESv2.gni"):
+    lists |= dict(re.findall(r'^(\w+) = \[([^\]]*)\]', open(os.path.join(src, gni)).read(), re.M))
+files = [f for k in ("angle_translator_sources", "angle_translator_glsl_symbol_table_sources", "angle_translator_essl_sources",
+                     "angle_translator_glsl_sources", "angle_translator_apple_sources", "angle_translator_glsl_base_sources",
+                     "angle_translator_glsl_and_vulkan_base_sources", "angle_preprocessor_sources", "libangle_common_sources",
+                     "xxhash_sources")
+         for f in re.findall(r'"([^"]+)"', lists[k])]
+# libGLESv2.gni adds these to libangle_common_sources inside `if (is_apple)` / `if (is_mac)`, which the regex skips.
+files += ["src/common/gl/cgl/FunctionsCGL.cpp", "src/common/system_utils_apple.cpp", "src/common/system_utils_posix.cpp",
+          "src/common/system_utils_mac.cpp", "src/libShaderTranslator/libShaderTranslator.cpp"]
+missing = [f for f in files if not os.path.exists(os.path.join(src, f))]
+assert not missing, f"not in the tarballs: {missing}"
+print("set(ANGLE_SOURCES", *(f"angle/{f}" for f in files if f.endswith((".cpp", ".c"))), ")")
+EOF
 
 cat > "$out/CMakeLists.txt" <<'EOF'
 cmake_minimum_required(VERSION 3.20)
 project(shadertranslator C CXX)
 set(CMAKE_CXX_STANDARD 17)
-set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 set(CMAKE_OSX_ARCHITECTURES arm64)
-add_subdirectory(angle)
+include(sources.cmake)
+add_library(shadertranslator SHARED ${ANGLE_SOURCES})
+target_include_directories(shadertranslator PRIVATE angle/include angle/src angle/src/common/third_party/base)
+# GN's translator_lib defines for this configuration, plus the shared library's own.
+target_compile_definitions(shadertranslator PRIVATE ANGLE_ENABLE_ESSL ANGLE_ENABLE_GLSL ANGLE_ENABLE_APPLE_WORKAROUNDS
+  AEMU_TRANSLATOR LIBANGLE_IMPLEMENTATION)
+target_link_libraries(shadertranslator PRIVATE "-framework CoreFoundation" "-framework Foundation" "-framework IOKit"
+  "-framework OpenGL")
+set_target_properties(shadertranslator PROPERTIES INSTALL_NAME_DIR @rpath)
 EOF
 cmake -S "$out" -B "$out/build" -DCMAKE_BUILD_TYPE=Release
-cmake --build "$out/build" --target angle_shader_translator --parallel
-# The emulator links these two static targets into its shared library the same way.
-c++ -dynamiclib -arch arm64 -o "$out/libshadertranslator.dylib" -install_name @rpath/libshadertranslator.dylib \
-  -Wl,-force_load,"$out/build/angle/libangle_shader_translator.a" "$out/build/angle/libangle_common.a" \
-  -framework CoreFoundation -framework Foundation
+cmake --build "$out/build" --parallel
+cp "$out/build/libshadertranslator.dylib" "$out/libshadertranslator.dylib"
 for s in STInitialize STFinalize STGenerateResources STCompileAndResolve STFreeShaderResolveState STCopyVariable \
   STCopyInterfaceBlock STDestroyVariable STDestroyInterfaceBlock; do
   nm -gU "$out/libshadertranslator.dylib" | grep -q " _$s\$" || { echo "libshadertranslator: $s not exported" >&2; exit 1; }
