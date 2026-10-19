@@ -28,10 +28,10 @@ index 0e02323..3ddbd5c 100644
  virtio_pci_ss.add(when: 'CONFIG_VHOST_USER_SCSI', if_true: files('vhost-user-scsi-pci.c'))
 diff --git a/hw/virtio/virtio-vsock-android.c b/hw/virtio/virtio-vsock-android.c
 new file mode 100644
-index 0000000..488a64f
+index 0000000..0cce44b
 --- /dev/null
 +++ b/hw/virtio/virtio-vsock-android.c
-@@ -0,0 +1,627 @@
+@@ -0,0 +1,636 @@
 +/*
 + * android-vsock: a userspace virtio-vsock device for Android's goldfish images.
 + *
@@ -40,8 +40,8 @@ index 0000000..488a64f
 + * vendor image uses vsock for:
 + *  - guest -> host port 5000: qemud services over the pipe handshake
 + *    ("pipe:qemud:<service>\0", then 4-hex-digit framed messages). Only
-+ *    "boot-properties" (qemu-props) and "sensors" (sensors HAL) are served;
-+ *    anything else is reset so its client gives up or falls back.
++ *    "boot-properties" (qemu-props) and "sensors" (sensors HAL) are served,
++ *    other services are held open and ignored.
 + *    The accelerometer follows the "rotation" property (degrees the device
 + *    is turned counter-clockwise), so Mini's rotate buttons reorient the guest.
 + *  - host -> guest port 5555 (adbd): bridged to the "adb" chardev, so
@@ -75,7 +75,7 @@ index 0000000..488a64f
 +#define QUEUE_SIZE 128
 +#define BUF_ALLOC (256 * 1024)  /* receive buffer we advertise per connection */
 +
-+typedef enum { SVC_CONNECTING, SVC_BOOT_PROPERTIES, SVC_SENSORS } Service;
++typedef enum { SVC_CONNECTING, SVC_BOOT_PROPERTIES, SVC_SENSORS, SVC_IGNORED } Service;
 +
 +typedef struct Conn {
 +    uint32_t local_port, peer_port;  /* host side, guest side */
@@ -293,10 +293,19 @@ index 0000000..488a64f
 +        } else if (!strcmp(name, "pipe:qemud:sensors")) {
 +            c->svc = SVC_SENSORS;
 +        } else {
-+            qemu_log_mask(LOG_UNIMP, "android-vsock: no service for '%s'\n", name);
-+            return false;
++            /*
++             * Held open and ignored rather than reset: clients such as
++             * system_server's EmulatorClipboardMonitor reconnect at once
++             * after a reset or EOF, which spins a CPU and floods logcat.
++             */
++            qemu_log_mask(LOG_UNIMP, "android-vsock: ignoring '%s'\n", name);
++            c->svc = SVC_IGNORED;
 +        }
 +        g_byte_array_remove_range(c->in, 0, nul - c->in->data + 1);
++    }
++    if (c->svc == SVC_IGNORED) {
++        g_byte_array_set_size(c->in, 0);
++        return true;
 +    }
 +    while (c->in->len >= 4) {
 +        char hdr[5] = { 0 };
