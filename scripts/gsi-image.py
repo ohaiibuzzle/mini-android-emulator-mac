@@ -10,7 +10,7 @@ declares android.software.freeform_window_management (pair with a freeform AVD: 
 source.properties gets the out dir's tag (its parent dir name) and the display name, so AVDs label it.
 Needs lz4 and e2fsprogs (brew install lz4 e2fsprogs).
 """
-import lzma, os, re, shutil, struct, subprocess, sys, tempfile, uuid, zlib
+import atexit, lzma, os, re, shutil, struct, subprocess, sys, tempfile, uuid, zlib
 
 SECTOR, ALIGN = 512, 1 << 20
 LINUX_FS = uuid.UUID("0fc63daf-8483-4772-8e79-3d69d8477de4")
@@ -143,7 +143,7 @@ def e2(tool, *args, ok=(0,), input=None):
     return r.stdout
 
 
-def ext4_edit(img, path, edit, tmp, like=None):
+def ext4_edit(img, path, edit, like=None):
     """Rewrites (or creates) one file in an ext4 image through edit(text), keeping the owner, mode and
     SELinux label of the file itself, or of `like` for a new file."""
     old = e2("debugfs", "-R", f"cat {path}", img)
@@ -154,6 +154,10 @@ def ext4_edit(img, path, edit, tmp, like=None):
     st = e2("debugfs", "-R", f"stat {like}", img)
     mode = re.search(r"Mode:\s+(\d+)", st).group(1)
     uid, gid = re.search(r"User:\s+(\d+)\s+Group:\s+(\d+)", st).groups()
+    # debugfs splits its commands at spaces and still exits 0, so these host paths must have none:
+    # not under the output dir, which is in "Application Support".
+    tmp = tempfile.mkdtemp()
+    assert " " not in tmp, tmp
     text, label = os.path.join(tmp, "text"), os.path.join(tmp, "label")
     with open(text, "w") as f:
         f.write(new)
@@ -162,6 +166,7 @@ def ext4_edit(img, path, edit, tmp, like=None):
             f"sif {path} mode 0100{mode}", f"ea_set -f {label} {path} security.selinux"]
     e2("debugfs", "-w", "-f", "-", img, input="\n".join(cmds) + "\n")
     e2("e2fsck", "-fn", img)
+    shutil.rmtree(tmp)
     assert e2("debugfs", "-R", f"cat {path}", img) == new
 
 
@@ -186,6 +191,7 @@ def main(base, gsi, out, display="GSI"):
     sup = gpt_read(sysimg)["super"][0]
     lp = super_extents(sysimg, sup)
     tmp = tempfile.mkdtemp(dir=out)
+    atexit.register(shutil.rmtree, tmp, ignore_errors=True)  # a failed run leaves no half-built images behind
     vendor = os.path.join(tmp, "vendor.ext4")
     with open(vendor, "wb") as f:
         copy_range(sysimg, lp["vendor"], f, 0)
@@ -193,9 +199,9 @@ def main(base, gsi, out, display="GSI"):
     # Google's vendor is deduplicated (shared_blocks) and full; grow it, then un-share so it's writable.
     e2("resize2fs", "-f", vendor)
     e2("e2fsck", "-fy", "-E", "unshare_blocks", vendor, ok=(0, 1))
-    ext4_edit(vendor, "/etc/fstab.ranchu", patch_fstab, tmp)  # what vold reads after switch_root
+    ext4_edit(vendor, "/etc/fstab.ranchu", patch_fstab)  # what vold reads after switch_root
     # Declares freeform support up front, so a freeform AVD profile gets desktop windows without the dev option.
-    ext4_edit(vendor, "/etc/permissions/android.software.freeform_window_management.xml", lambda _: FREEFORM, tmp,
+    ext4_edit(vendor, "/etc/permissions/android.software.freeform_window_management.xml", lambda _: FREEFORM,
               like="/etc/fstab.ranchu")
     system = os.path.join(tmp, "system.img")
     if gsi.endswith(".xz"):
@@ -208,7 +214,7 @@ def main(base, gsi, out, display="GSI"):
     is_ext4 = head[1080:1082] == b"\x53\xef"
     # shortcut: erofs GSIs can't be edited here, so they get no init.rc fix; unpack/repack with mkfs.erofs if one needs it.
     if is_ext4 and e2("debugfs", "-R", "stat /system/etc/init/hw/init.rc", system).strip():
-        ext4_edit(system, "/system/etc/init/hw/init.rc", fix_init_rc, tmp)
+        ext4_edit(system, "/system/etc/init/hw/init.rc", fix_init_rc)
     whole = lambda path: [(path, [(0, os.path.getsize(path))])]
     sources = {"system": whole(system), "vendor": whole(vendor), "system_dlkm": [(sysimg, lp["system_dlkm"])]}
     gpt_write(os.path.join(out, "system.img"), [(LABEL + p, sources[p], sum(n for _, segs in sources[p] for _, n in segs)) for p in PARTS])
