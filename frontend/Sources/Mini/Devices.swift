@@ -32,11 +32,11 @@ struct SystemImage: Hashable, Identifiable {
 struct DeviceConfig: Equatable {
   var size = DisplaySize()
   var ramMB = 2048
+  var storageMB = 6144  // userdata; the emulator only applies a new size to a freshly made partition
   var freeform = false
   var refreshHz = 60
   var sysdir = BaseImage.sysdir  // read-only after creation
 
-  static let ramChoices = [2048, 3072, 4096, 6144, 8192]
   static let refreshChoices = [60, 90, 120]
 
   init() {}
@@ -44,23 +44,29 @@ struct DeviceConfig: Equatable {
   init(_ ini: [String: String]) {
     let lcd = ["hw.lcd.width", "hw.lcd.height", "hw.lcd.density"].map { ini[$0].flatMap(Int.init) }
     if let w = lcd[0], let h = lcd[1], let d = lcd[2] { size = DisplaySize(width: w, height: h, density: d) }
-    ramMB = ini["hw.ramSize"].flatMap(Self.megabytes) ?? ramMB
+    ramMB = ini["hw.ramSize"].flatMap { Self.megabytes($0) } ?? ramMB
+    storageMB = ini["disk.dataPartition.size"].flatMap { Self.megabytes($0, bare: 1) } ?? storageMB
     freeform = ini["display.settings.xml"] == "freeform"
     refreshHz = ini["hw.lcd.vsync"].flatMap(Int.init) ?? refreshHz
     sysdir = ini["image.sysdir.1"] ?? sysdir
   }
 
-  /// hw.ramSize is MB, with an optional M or G suffix ("2048", "2048M", "2G").
-  static func megabytes(_ s: String) -> Int? {
+  /// Sizes with an optional M or G suffix. A bare number is MB for hw.ramSize but bytes for
+  /// disk.dataPartition.size (what Android Studio writes), so `bare` is its unit in bytes.
+  static func megabytes(_ s: String, bare: Int = 1 << 20) -> Int? {
     let v = s.trimmingCharacters(in: .whitespaces).uppercased()
     if v.hasSuffix("G") { return Int(v.dropLast()).map { $0 * 1024 } }
-    return Int(v.hasSuffix("M") ? String(v.dropLast()) : v)
+    if v.hasSuffix("M") { return Int(v.dropLast()) }
+    return Int(v).map { $0 * bare / (1 << 20) }
   }
+
+  /// Within what the emulator boots.
+  var valid: Bool { size.valid && (1024...65536).contains(ramMB) && (2048...1 << 20).contains(storageMB) }
 
   var values: [String: String?] {
     [
       "hw.lcd.width": "\(size.width)", "hw.lcd.height": "\(size.height)", "hw.lcd.density": "\(size.density)",
-      "hw.ramSize": "\(ramMB)M",
+      "hw.ramSize": "\(ramMB)M", "disk.dataPartition.size": "\(storageMB)M",
       // The emulator turns this into androidboot.qemu.display.settings.xml; Google's provisioning app enables desktop windows.
       "display.settings.xml": freeform ? "freeform" : nil,
       "hw.lcd.vsync": "\(refreshHz)",  // the guest display's only mode; Mini lifts Android's 60 Hz default cap after boot
@@ -104,7 +110,7 @@ enum Devices {
       "abi.type": image.abi, "hw.cpu.arch": "arm64", "hw.cpu.ncore": "4",
       "hw.keyboard": "yes",  // without it the guest has no keyboard device and keys are dropped
       "hw.gpu.enabled": "yes", "hw.gpu.mode": "host", "hw.initialOrientation": "portrait",
-      "hw.sdCard": "yes", "sdcard.size": "512 MB", "disk.dataPartition.size": "6G", "fastboot.forceFastBoot": "yes",
+      "hw.sdCard": "yes", "sdcard.size": "512 MB", "fastboot.forceFastBoot": "yes",
       "image.sysdir.1": image.sysdir, "tag.id": image.tagID, "tag.display": image.tagDisplay, "target": image.target,
     ]
     try Prefs.ini("", setting: base.merging(c.values) { _, new in new })
@@ -118,14 +124,24 @@ enum Devices {
     try FileManager.default.removeItem(atPath: "\(Prefs.avdHome)/\(name).ini")
   }
 
-  /// Quits (the emulator saves its snapshot) and reopens Mini on `name`.
-  static func relaunch(with name: String) {
+  /// What a data wipe removes; the emulator recreates userdata from the image at the configured size.
+  static func dataFiles(_ name: String) -> [String] {
+    let dir = URL(fileURLWithPath: Prefs.configPath(avd: name)).deletingLastPathComponent().path
+    return ["userdata-qemu.img", "userdata-qemu.img.qcow2", "snapshots"].map { "\(dir)/\($0)" }
+  }
+
+  static func erase(_ name: String) throws {
+    for path in dataFiles(name) where FileManager.default.fileExists(atPath: path) { try FileManager.default.removeItem(atPath: path) }
+  }
+
+  /// Quits (the emulator saves its snapshot) and reopens Mini on `name`, erasing its data in between if asked.
+  static func relaunch(with name: String, erase: Bool = false) {
     UserDefaults.standard.set(name, forKey: Prefs.avd)
     // shortcut: a `swift run` build isn't an app bundle, so it just quits; relaunch it by hand.
     let sh = Process()
     sh.executableURL = URL(fileURLWithPath: "/bin/sh")
-    sh.arguments = ["-c", "while kill -0 \"$1\" 2>/dev/null; do sleep 0.2; done; exec /usr/bin/open \"$2\" --args --start \"$3\"",
-                    "sh", "\(getpid())", Bundle.main.bundlePath, name]
+    sh.arguments = ["-c", "while kill -0 \"$1\" 2>/dev/null; do sleep 0.2; done; a=$2 n=$3; shift 3; rm -rf \"$@\"; exec /usr/bin/open \"$a\" --args --start \"$n\"",
+                    "sh", "\(getpid())", Bundle.main.bundlePath, name] + (erase ? dataFiles(name) : [])
     if Bundle.main.bundlePath.hasSuffix(".app") { try? sh.run() }
     NSApp.terminate(nil)
   }
@@ -185,6 +201,7 @@ struct DevicesView: View {
   @State private var error: String?
   @State private var creating: NewDeviceView.Source?
   @State private var confirmDelete = false
+  @State private var eraseThenStart: Bool?  // set while asking to erase data for a storage change
 
   var body: some View {
     HStack(spacing: 0) {
@@ -250,10 +267,10 @@ struct DevicesView: View {
         Text("\(config.size.width * 160 / max(config.size.density, 1)) dp wide").font(.caption).foregroundStyle(.secondary)
       }
       Section("Hardware") {
-        Picker("Memory", selection: $config.ramMB) {
-          ForEach(DeviceConfig.ramChoices, id: \.self) { Text("\($0 / 1024) GB").tag($0) }
-          if !DeviceConfig.ramChoices.contains(config.ramMB) { Text("\(config.ramMB) MB").tag(config.ramMB) }
-        }
+        TextField("Memory (MB)", value: $config.ramMB, format: .number.grouping(.never))
+        TextField("Storage (MB)", value: $config.storageMB, format: .number.grouping(.never))
+        Text("Memory 1024–65536 MB, storage at least 2048 MB. Changing storage erases the device's data.")
+          .font(.caption).foregroundStyle(.secondary)
         Toggle("Desktop windowing (freeform)", isOn: $config.freeform)
         Picker("Refresh rate", selection: $config.refreshHz) {
           ForEach(DeviceConfig.refreshChoices, id: \.self) { Text("\($0) Hz").tag($0) }
@@ -265,19 +282,33 @@ struct DevicesView: View {
           Text(error ?? "Changes apply the next time the device boots; the quick-boot snapshot is discarded.")
             .font(.caption).foregroundStyle(error == nil ? Color.secondary : Color.red)
           Spacer()
-          Button("Save") {
-            do { try config.save(avd: name); saved = config; error = nil } catch { self.error = error.localizedDescription }
-          }
-          .disabled(!config.size.valid || config == saved)
-          Button(name == Devices.running ? "Restart" : "Start") {
-            if config != saved { try? config.save(avd: name) }
-            Devices.relaunch(with: name)
-          }
-          .keyboardShortcut(.defaultAction).disabled(!config.size.valid)
+          Button("Save") { if erasing { eraseThenStart = false } else { commit(name, start: false) } }
+            .disabled(!config.valid || config == saved)
+          Button(name == Devices.running ? "Restart" : "Start") { if erasing { eraseThenStart = true } else { commit(name, start: true) } }
+            .keyboardShortcut(.defaultAction).disabled(!config.valid)
         }
       }
     }
     .formStyle(.grouped)
+    .confirmationDialog("Erase \(name)'s data?", isPresented: Binding { eraseThenStart != nil } set: { if !$0 { eraseThenStart = nil } }) {
+      Button("Erase and Save", role: .destructive) { commit(name, start: eraseThenStart ?? false) }
+    } message: {
+      Text("The new storage size needs a fresh data partition: apps, files and settings on this device are lost."
+        + (name == Devices.running ? " It restarts now." : ""))
+    }
+  }
+
+  private var erasing: Bool { saved.map { $0.storageMB != config.storageMB } ?? false }
+
+  /// Saves, erases data if storage changed (after quitting, for the running device), and starts if asked.
+  private func commit(_ name: String, start: Bool) {
+    let erase = erasing
+    do {
+      try config.save(avd: name)
+      saved = config
+      error = nil
+      if start || (erase && name == Devices.running) { Devices.relaunch(with: name, erase: erase) } else if erase { try Devices.erase(name) }
+    } catch { self.error = error.localizedDescription }
   }
 
   private func load() {
@@ -338,6 +369,8 @@ struct NewDeviceView: View {
       }
       .onChange(of: config.size) { config.freeform = config.size == DisplaySize.presets[2].1 }
       Toggle("Desktop windowing (freeform)", isOn: $config.freeform)
+      TextField("Memory (MB)", value: $config.ramMB, format: .number.grouping(.never))
+      TextField("Storage (MB)", value: $config.storageMB, format: .number.grouping(.never))
       if let error { Text(error).font(.caption).foregroundStyle(.red).textSelection(.enabled) }
       HStack {
         if busy { ProgressView().controlSize(.small); Text(source == .gsi ? "Converting…" : "").font(.caption) }
@@ -353,7 +386,7 @@ struct NewDeviceView: View {
 
   private var nameOK: Bool { Devices.validName(name) && !Prefs.avds().contains(name) }
   private var ready: Bool {
-    nameOK && (source == .image ? image != nil : gsi != nil && baseInstalled && !GSIImport.missingTools)
+    nameOK && config.valid && (source == .image ? image != nil : gsi != nil && baseInstalled && !GSIImport.missingTools)
   }
 
   private func refresh() {
