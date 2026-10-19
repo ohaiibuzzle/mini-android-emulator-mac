@@ -318,6 +318,33 @@ struct NewDeviceView: View {
   @State private var baseInstalled = BaseImage.installed
 
   var body: some View {
+    ZStack {
+      form.disabled(!baseInstalled)
+      if !baseInstalled { needsBase }
+    }
+    .frame(width: 480)
+    .onAppear(perform: refresh)
+  }
+
+  /// Both sources boot on the base image (a GSI borrows its kernel and vendor), so nothing works until it's here.
+  private var needsBase: some View {
+    VStack(spacing: 14) {
+      Image(systemName: "arrow.down.circle").font(.system(size: 40)).foregroundStyle(.secondary)
+      Text("Mini needs to download Google's Android Studio base image to continue.")
+        .font(.headline).multilineTextAlignment(.center)
+      Text("New devices and imported GSIs both boot on Google's API 37 image (about 2.2 GB).")
+        .font(.caption).foregroundStyle(.secondary).multilineTextAlignment(.center)
+      HStack {
+        Button("Cancel") { done(nil) }
+        Button("Download…") { SetupWindow.showBaseImage { refresh() } }.keyboardShortcut(.defaultAction)
+      }
+    }
+    .padding(30)
+    .frame(maxWidth: .infinity, maxHeight: .infinity)
+    .background(.background)
+  }
+
+  private var form: some View {
     Form {
       Picker("Source", selection: $source) {
         Text("Installed image").tag(Source.image)
@@ -329,14 +356,8 @@ struct NewDeviceView: View {
         Text("Use letters, digits, . _ - and a name no other device has.").font(.caption).foregroundStyle(.red)
       }
       if source == .image {
-        if images.isEmpty {
-          LabeledContent("Image") {
-            Button("Download Google's API 37 image…") { SetupWindow.showBaseImage { refresh() } }
-          }
-        } else {
-          Picker("Image", selection: $image) {
-            ForEach(images) { Text($0.label).tag(Optional($0)) }
-          }
+        Picker("Image", selection: $image) {
+          ForEach(images) { Text($0.label).tag(Optional($0)) }
         }
       } else {
         LabeledContent("GSI") {
@@ -346,15 +367,6 @@ struct NewDeviceView: View {
         if GSIImport.missingTools {
           Text("Import needs lz4 and e2fsprogs: brew install lz4 e2fsprogs").font(.caption).foregroundStyle(.red)
             .textSelection(.enabled)
-        }
-      }
-      // The image tab's empty picker already offers the download.
-      if !baseInstalled && !(source == .image && images.isEmpty) {
-        HStack {
-          Text(source == .gsi ? "Import GSI needs Google's API 37 base image." : "Google's API 37 image isn't installed.")
-            .font(.caption)
-          Spacer()
-          Button("Download…") { SetupWindow.showBaseImage { refresh() } }
         }
       }
       Picker("Screen", selection: $config.size) {
@@ -373,8 +385,6 @@ struct NewDeviceView: View {
       }
     }
     .formStyle(.grouped)
-    .frame(width: 480)
-    .onAppear(perform: refresh)
   }
 
   private var nameOK: Bool { Devices.validName(name) && !Prefs.avds().contains(name) }
