@@ -186,20 +186,25 @@ final class ScreenView: NSView {
 
   private func raw(_ e: NSEvent, down: Bool) { inputs.yield(MiniMsg.encode(MiniMsg.macKey, Int32(e.keyCode), down ? 1 : 0)) }
 
+  // ⌘ combinations are Mini's (the Device menu handles them before they get here); everything else goes to the guest.
   override func keyDown(with e: NSEvent) {
-    let mods = e.modifierFlags.intersection(.deviceIndependentFlagsMask)
-    switch (mods, e.charactersIgnoringModifiers?.lowercased()) {
-    case ([.command, .shift], "h"): named("GoHome")
-    case (.command, "\u{7f}"): named("GoBack")  // ⌘⌫
-    case (.command, "p"): named("Power")
-    case (.command, "o"): named("AppSwitch")
-    case (let m, _) where m.contains(.command): super.keyDown(with: e)  // menu shortcuts (⌘Q)
-    default: raw(e, down: true)
-    }
+    if e.modifierFlags.contains(.command) { super.keyDown(with: e) } else { raw(e, down: true) }
   }
 
   override func keyUp(with e: NSEvent) {
     if !e.modifierFlags.contains(.command) { raw(e, down: false) }
+  }
+
+  /// Modifier keys never reach keyDown/keyUp; AppKit reports them here. Each side has its own device bit (IOKit's
+  /// NX_DEVICE*KEYMASK), so letting go of one Shift while holding the other stays correct. ⌘ isn't forwarded: it's Mini's.
+  override func flagsChanged(with e: NSEvent) {
+    let side: [UInt16: UInt] = [56: 0x2, 60: 0x4, 59: 0x1, 62: 0x2000, 58: 0x20, 61: 0x40]  // ⇧ ⇧ ⌃ ⌃ ⌥ ⌥, left then right
+    if let bit = side[e.keyCode] {
+      raw(e, down: e.modifierFlags.rawValue & bit != 0)
+    } else if e.keyCode == 57 {  // Caps Lock: one event per toggle, which the guest toggles on a full press
+      raw(e, down: true)
+      raw(e, down: false)
+    }
   }
 }
 
@@ -270,18 +275,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
   }
 
   private func addSoftButtons(for view: ScreenView) {
-    let buttons: [(symbol: String, label: String, action: () -> Void)] = [
-      ("chevron.backward", "Back", { view.named("GoBack") }),
-      ("circle", "Home", { view.named("GoHome") }),
-      ("square", "Overview", { view.named("AppSwitch") }),
-      ("rotate.left", "Rotate left", { view.rotate(by: 90) }),
-      ("rotate.right", "Rotate right", { view.rotate(by: -90) }),
-      ("speaker.wave.1", "Volume down", { view.named("AudioVolumeDown") }),
-      ("speaker.wave.3", "Volume up", { view.named("AudioVolumeUp") }),
-      ("power", "Power", { view.named("Power") }),
-      ("camera", "Screenshot to Desktop", { view.saveScreenshot() }),
+    // Shortcuts are the Android Emulator's, so they're what Android developers' fingers already know.
+    let arrow = { (k: Int) in String(Character(UnicodeScalar(k)!)) }
+    let buttons: [(symbol: String, label: String, key: String, mods: NSEvent.ModifierFlags, action: () -> Void)] = [
+      ("chevron.backward", "Back", "\u{8}", .command, { view.named("GoBack") }),  // ⌘⌫
+      ("circle", "Home", "h", [.command, .shift], { view.named("GoHome") }),
+      ("square", "Overview", "o", .command, { view.named("AppSwitch") }),
+      ("rotate.left", "Rotate left", arrow(NSLeftArrowFunctionKey), .command, { view.rotate(by: 90) }),
+      ("rotate.right", "Rotate right", arrow(NSRightArrowFunctionKey), .command, { view.rotate(by: -90) }),
+      ("speaker.wave.1", "Volume down", arrow(NSDownArrowFunctionKey), .command, { view.named("AudioVolumeDown") }),
+      ("speaker.wave.3", "Volume up", arrow(NSUpArrowFunctionKey), .command, { view.named("AudioVolumeUp") }),
+      ("power", "Power", "p", .command, { view.named("Power") }),
+      ("camera", "Screenshot to Desktop", "s", .command, { view.saveScreenshot() }),
     ]
     buttonActions = buttons.map(\.action)
+    let deviceMenu = NSMenu(title: "Device")
+    for (i, b) in buttons.enumerated() {
+      let item = deviceMenu.addItem(withTitle: b.label, action: #selector(softButton(_:)), keyEquivalent: b.key)
+      item.keyEquivalentModifierMask = b.mods
+      item.target = self
+      item.tag = i
+    }
+    let deviceItem = NSMenuItem(title: "Device", action: nil, keyEquivalent: "")
+    deviceItem.submenu = deviceMenu
+    NSApp.mainMenu?.addItem(deviceItem)
     let stack = NSStackView(views: buttons.enumerated().map { i, b in
       let button = NSButton(
         image: NSImage(systemSymbolName: b.symbol, accessibilityDescription: b.label)!, target: self,
@@ -300,7 +317,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     window.addTitlebarAccessoryViewController(accessory)
   }
 
-  @objc func softButton(_ sender: NSButton) { buttonActions[sender.tag]() }
+  @objc func softButton(_ sender: Any) { buttonActions[(sender as? NSButton)?.tag ?? (sender as! NSMenuItem).tag]() }
   @objc func showSettings(_ sender: Any?) { SettingsWindow.show() }
   @objc func showDevices(_ sender: Any?) { DevicesWindow.show() }
   @objc func showLog(_ sender: Any?) { NSWorkspace.shared.open(logURL) }
