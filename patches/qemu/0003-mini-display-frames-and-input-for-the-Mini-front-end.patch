@@ -1,0 +1,336 @@
+diff --git a/qapi/qom.json b/qapi/qom.json
+index c55776a..1596ba7 100644
+--- a/qapi/qom.json
++++ b/qapi/qom.json
+@@ -543,6 +543,21 @@
+             '*width': 'str',
+             '*height': 'str' } }
+ 
++##
++# @MiniDisplayProperties:
++#
++# Properties for mini-display objects.
++#
++# @chardev: socket chardev the Mini front-end connects to
++#
++# @shm: file holding two frames, created and mapped by Mini too
++#
++# Since: 11.1
++##
++{ 'struct': 'MiniDisplayProperties',
++  'data': { 'chardev': 'str',
++            'shm': 'str' } }
++
+ ##
+ # @InputLinuxProperties:
+ #
+@@ -1283,6 +1298,7 @@
+     { 'name': 'igvm-cfg',
+       'if': 'CONFIG_IGVM' },
+     'input-barrier',
++    'mini-display',
+     { 'name': 'input-linux',
+       'if': 'CONFIG_LINUX' },
+     'iommufd',
+@@ -1363,6 +1379,7 @@
+       'igvm-cfg':                   { 'type': 'IgvmCfgProperties',
+                                       'if': 'CONFIG_IGVM' },
+       'input-barrier':              'InputBarrierProperties',
++      'mini-display':               'MiniDisplayProperties',
+       'input-linux':                { 'type': 'InputLinuxProperties',
+                                       'if': 'CONFIG_LINUX' },
+       'iommufd':                    'IOMMUFDProperties',
+diff --git a/system/vl.c b/system/vl.c
+index 061cbdf..41b1b00 100644
+--- a/system/vl.c
++++ b/system/vl.c
+@@ -1976,7 +1976,8 @@ static bool object_create_early(const char *type)
+     if (g_str_equal(type, "rng-egd") ||
+         g_str_equal(type, "qtest") ||
+         g_str_equal(type, "monitor-hmp") ||
+-        g_str_equal(type, "monitor-qmp")) {
++        g_str_equal(type, "monitor-qmp") ||
++        g_str_equal(type, "mini-display")) {
+         return false;
+     }
+ 
+diff --git a/ui/meson.build b/ui/meson.build
+index d345f6c..3e9e7f4 100644
+--- a/ui/meson.build
++++ b/ui/meson.build
+@@ -55,6 +55,7 @@ ui = declare_dependency(objects: libui.extract_all_objects(recursive: false), de
+ system_ss.add(png)
+ system_ss.add(files(
+   'input-barrier.c',
++  'mini.c',
+   'input.c',
+   'ui-hmp-cmds.c',
+   'ui-qmp-cmds.c',
+diff --git a/ui/mini.c b/ui/mini.c
+new file mode 100644
+index 0000000..e9c4447
+--- /dev/null
++++ b/ui/mini.c
+@@ -0,0 +1,262 @@
++/*
++ * mini-display: hands the first graphic console to the Mini front-end.
++ *
++ *   -object mini-display,id=mini,chardev=<socket chardev>,shm=<file>
++ *
++ * Mini creates <file> (two RGBX frames of up to <side>x<side>, side being
++ * the longer screen edge) and connects to the chardev. On every update the
++ * console is copied, turned by the current rotation, into the frame Mini
++ * isn't showing and a FrameMsg names it. Mini sends InputMsgs back: touch in
++ * panel pixels, Linux or macOS key codes, and the device rotation, which
++ * also tilts the android-vsock accelerometer so the guest reorients.
++ *
++ * SPDX-License-Identifier: GPL-2.0-or-later
++ */
++
++#include "qemu/osdep.h"
++#include "qapi/error.h"
++#include "qom/object_interfaces.h"
++#include "qom/object.h"
++#include "system/system.h"
++#include "chardev/char-fe.h"
++#include "ui/console.h"
++#include "ui/input.h"
++#include <sys/mman.h>
++
++#define TYPE_MINI_DISPLAY "mini-display"
++OBJECT_DECLARE_SIMPLE_TYPE(MiniDisplay, MINI_DISPLAY)
++
++typedef struct FrameMsg {
++    uint32_t width, height;
++    uint32_t rotation;  /* quarter turns counter-clockwise, as Mini's SkinRotation */
++    uint32_t buffer;    /* 0 or 1: which half of the shm file */
++} FrameMsg;
++
++enum { MSG_TOUCH = 1, MSG_KEY = 2, MSG_MAC_KEY = 3, MSG_ROTATE = 4 };
++
++typedef struct InputMsg {
++    uint8_t type;
++    uint8_t pad[3];
++    int32_t a, b, c;  /* touch: x, y, down; key: code, down; rotate: degrees */
++} InputMsg;
++
++struct MiniDisplay {
++    Object parent_obj;
++    char *chardev, *shm;
++
++    CharFrontend chr;
++    DisplayChangeListener dcl;
++    Notifier init_done;
++    uint8_t *map;
++    size_t map_size;
++    uint32_t buffer, rotation;
++    struct touch_slot slots[INPUT_EVENT_SLOTS_MAX];
++    bool touching;
++    InputMsg in;
++    size_t in_len;
++};
++
++static void mini_update(DisplayChangeListener *dcl, int x, int y, int w, int h)
++{
++    MiniDisplay *s = container_of(dcl, MiniDisplay, dcl);
++    DisplaySurface *surf = qemu_console_surface(dcl->con);
++
++    /* Flips pass through QEMU's "Display output is not active" placeholder. */
++    if (!surf || surface_is_placeholder(surf) || !qemu_chr_fe_backend_open(&s->chr)) {
++        return;
++    }
++    int pw = surface_width(surf), ph = surface_height(surf);
++    bool turned = s->rotation & 1;
++    int dw = turned ? ph : pw, dh = turned ? pw : ph;
++    size_t half = s->map_size / 2;
++    if ((size_t)dw * dh * 4 > half) {
++        return;
++    }
++    s->buffer ^= 1;
++    pixman_image_t *dst = pixman_image_create_bits(PIXMAN_a8b8g8r8, dw, dh,
++        (uint32_t *)(s->map + s->buffer * half), dw * 4);
++    /* Destination pixel -> panel pixel, the inverse of Mini's panelPoint(). */
++    pixman_transform_t t;
++    pixman_transform_init_identity(&t);
++    switch (s->rotation & 3) {
++    case 1:  /* panel x = W - y, panel y = x */
++        pixman_transform_init_rotate(&t, 0, pixman_fixed_1);
++        pixman_transform_translate(&t, NULL, pixman_int_to_fixed(pw), 0);
++        break;
++    case 2:  /* x = W - x, y = H - y */
++        pixman_transform_init_rotate(&t, pixman_fixed_minus_1, 0);
++        pixman_transform_translate(&t, NULL, pixman_int_to_fixed(pw), pixman_int_to_fixed(ph));
++        break;
++    case 3:  /* x = y, y = H - x */
++        pixman_transform_init_rotate(&t, 0, pixman_fixed_minus_1);
++        pixman_transform_translate(&t, NULL, 0, pixman_int_to_fixed(ph));
++        break;
++    }
++    pixman_image_set_transform(surf->image, &t);
++    /* shortcut: copies the whole frame on every update; upgrade to dirty rects or zero-copy if it shows in profiles. */
++    pixman_image_composite(PIXMAN_OP_SRC, surf->image, NULL, dst, 0, 0, 0, 0, 0, 0, dw, dh);
++    pixman_image_set_transform(surf->image, NULL);
++    pixman_image_unref(dst);
++
++    FrameMsg f = { dw, dh, s->rotation & 3, s->buffer };
++    qemu_chr_fe_write(&s->chr, (uint8_t *)&f, sizeof(f));  /* dropped if Mini is behind */
++}
++
++/* A new surface is empty until the guest's next flush, which sends it. */
++static void mini_switch(DisplayChangeListener *dcl, DisplaySurface *surf)
++{
++}
++
++static void mini_refresh(DisplayChangeListener *dcl)
++{
++    qemu_console_hw_update(dcl->con);
++}
++
++static const DisplayChangeListenerOps mini_ops = {
++    .dpy_name = "mini",
++    .dpy_refresh = mini_refresh,
++    .dpy_gfx_update = mini_update,
++    .dpy_gfx_switch = mini_switch,
++};
++
++static void mini_input(MiniDisplay *s, const InputMsg *msg)
++{
++    QemuConsole *con = s->dcl.con;
++    DisplaySurface *surf = qemu_console_surface(con);
++
++    switch (msg->type) {
++    case MSG_TOUCH:
++        if (!surf || (!msg->c && !s->touching)) {
++            break;
++        }
++        qemu_input_touch_event(con, s->slots, 0, surface_width(surf), surface_height(surf),
++                               msg->a, msg->b,
++                               !msg->c ? INPUT_MULTI_TOUCH_TYPE_END :
++                               s->touching ? INPUT_MULTI_TOUCH_TYPE_UPDATE :
++                               INPUT_MULTI_TOUCH_TYPE_BEGIN, NULL);
++        s->touching = msg->c;
++        break;
++    case MSG_MAC_KEY:
++        if ((guint)msg->a < qemu_input_map_osx_to_linux_len) {
++            qemu_input_event_send_key_linux(con, qemu_input_map_osx_to_linux[msg->a], msg->b);
++        }
++        break;
++    case MSG_KEY:
++        qemu_input_event_send_key_linux(con, msg->a, msg->b);
++        break;
++    case MSG_ROTATE: {
++        s->rotation = ((msg->a / 90) % 4 + 4) % 4;
++        Object *vsock = object_resolve_type_unambiguous("android-vsock-device", NULL);
++        if (vsock) {
++            object_property_set_uint(vsock, "rotation", s->rotation * 90, NULL);
++        }
++        if (surf) {
++            mini_update(&s->dcl, 0, 0, surface_width(surf), surface_height(surf));
++        }
++        break;
++    }
++    }
++}
++
++static int mini_can_read(void *opaque)
++{
++    MiniDisplay *s = opaque;
++    return sizeof(s->in) - s->in_len;
++}
++
++static void mini_read(void *opaque, const uint8_t *buf, int size)
++{
++    MiniDisplay *s = opaque;
++
++    memcpy((uint8_t *)&s->in + s->in_len, buf, size);
++    s->in_len += size;
++    if (s->in_len == sizeof(s->in)) {
++        s->in_len = 0;
++        mini_input(s, &s->in);
++    }
++}
++
++static void mini_event(void *opaque, QEMUChrEvent event)
++{
++    MiniDisplay *s = opaque;
++
++    if (event == CHR_EVENT_OPENED) {
++        DisplaySurface *surf = qemu_console_surface(s->dcl.con);
++        s->in_len = 0;
++        if (surf) {  /* first frame right away */
++            mini_update(&s->dcl, 0, 0, surface_width(surf), surface_height(surf));
++        }
++    }
++}
++
++/* Consoles exist only once the machine is built. */
++static void mini_init_done(Notifier *n, void *data)
++{
++    MiniDisplay *s = container_of(n, MiniDisplay, init_done);
++
++    qemu_console_register_listener(qemu_console_lookup_by_index(0), &s->dcl, &mini_ops);
++}
++
++static void mini_complete(UserCreatable *uc, Error **errp)
++{
++    MiniDisplay *s = MINI_DISPLAY(uc);
++    Chardev *chr = s->chardev ? qemu_chr_find(s->chardev) : NULL;
++
++    if (!chr || !s->shm) {
++        error_setg(errp, "mini-display needs chardev= and shm=");
++        return;
++    }
++    int fd = open(s->shm, O_RDWR);
++    struct stat st;
++    if (fd < 0 || fstat(fd, &st) < 0) {
++        error_setg_errno(errp, errno, "mini-display: cannot open %s", s->shm);
++        if (fd >= 0) {
++            close(fd);
++        }
++        return;
++    }
++    s->map_size = st.st_size;
++    s->map = mmap(NULL, s->map_size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
++    close(fd);
++    if (s->map == MAP_FAILED) {
++        s->map = NULL;
++        error_setg_errno(errp, errno, "mini-display: cannot map %s", s->shm);
++        return;
++    }
++    for (int i = 0; i < INPUT_EVENT_SLOTS_MAX; i++) {
++        s->slots[i].tracking_id = -1;
++    }
++    if (!qemu_chr_fe_init(&s->chr, chr, errp)) {
++        return;
++    }
++    qemu_chr_fe_set_handlers(&s->chr, mini_can_read, mini_read, mini_event, NULL, s, NULL, true);
++    s->init_done.notify = mini_init_done;
++    qemu_add_machine_init_done_notifier(&s->init_done);
++}
++
++static char *mini_get_chardev(Object *o, Error **e) { return g_strdup(MINI_DISPLAY(o)->chardev); }
++static void mini_set_chardev(Object *o, const char *v, Error **e) { MINI_DISPLAY(o)->chardev = g_strdup(v); }
++static char *mini_get_shm(Object *o, Error **e) { return g_strdup(MINI_DISPLAY(o)->shm); }
++static void mini_set_shm(Object *o, const char *v, Error **e) { MINI_DISPLAY(o)->shm = g_strdup(v); }
++
++static void mini_class_init(ObjectClass *oc, const void *data)
++{
++    USER_CREATABLE_CLASS(oc)->complete = mini_complete;
++    object_class_property_add_str(oc, "chardev", mini_get_chardev, mini_set_chardev);
++    object_class_property_add_str(oc, "shm", mini_get_shm, mini_set_shm);
++}
++
++static const TypeInfo mini_info = {
++    .name = TYPE_MINI_DISPLAY,
++    .parent = TYPE_OBJECT,
++    .instance_size = sizeof(MiniDisplay),
++    .class_init = mini_class_init,
++    .interfaces = (const InterfaceInfo[]) { { TYPE_USER_CREATABLE }, { } },
++};
++
++static void mini_register(void)
++{
++    type_register_static(&mini_info);
++}
++
++type_init(mini_register)

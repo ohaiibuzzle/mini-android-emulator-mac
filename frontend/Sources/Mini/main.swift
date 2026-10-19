@@ -17,8 +17,8 @@ final class FrameBuffer: @unchecked Sendable {
   let ptr: UnsafeMutableRawPointer
   let size: Int
 
-  init(maxSide: Int) throws {
-    size = maxSide * maxSide * 4  // square bound so rotation never overflows
+  init(maxSide: Int, count: Int = 1) throws {
+    size = maxSide * maxSide * 4 * count  // square bound so rotation never overflows
     let fd = open(path, O_RDWR | O_CREAT | O_TRUNC, 0o600)
     guard fd >= 0, ftruncate(fd, off_t(size)) == 0,
       let p = mmap(nil, size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0), p != MAP_FAILED
@@ -30,9 +30,9 @@ final class FrameBuffer: @unchecked Sendable {
   deinit { munmap(ptr, size); unlink(path) }
 
   // shortcut: the emulator may write while we read, so frames can tear; upgrade to double-buffered shm if visible.
-  func image(width: Int, height: Int) -> CGImage? {
-    guard width * height * 4 <= size,
-      let provider = CGDataProvider(dataInfo: nil, data: ptr, size: width * height * 4, releaseData: { _, _, _ in })
+  func image(width: Int, height: Int, offset: Int = 0) -> CGImage? {
+    guard offset + width * height * 4 <= size,
+      let provider = CGDataProvider(dataInfo: nil, data: ptr + offset, size: width * height * 4, releaseData: { _, _, _ in })
     else { return nil }
     return CGImage(
       width: width, height: height, bitsPerComponent: 8, bitsPerPixel: 32, bytesPerRow: width * 4,
@@ -203,7 +203,8 @@ final class ScreenView: NSView {
 
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
-  let emulator = Process()
+  let emulator = Process()  // or QEMU, for devices on Mini's own engine
+  var qemu = false
   var window: NSWindow!
   var quitting = false
   var buttonActions: [() -> Void] = []
@@ -211,11 +212,41 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
   func applicationDidFinishLaunching(_ note: Notification) {
     let begin: () -> Void = { [weak self] in if Prefs.avds().contains(avd) { self?.start() } else { DevicesWindow.show() } }
-    if EmulatorSetup.installed { begin() } else { SetupWindow.show(done: begin) }
+    let onQemu = DeviceConfig.load(avd: avd)?.engine == .qemu
+    if EmulatorSetup.installed || onQemu { begin() } else { SetupWindow.show(done: begin) }
   }
 
   private func start() {
     Devices.running = avd
+    let config = DeviceConfig.load(avd: avd)
+    qemu = config?.engine == .qemu
+    try? FileManager.default.createDirectory(at: logURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+    if FileManager.default.createFile(atPath: logURL.path, contents: nil), let log = try? FileHandle(forWritingTo: logURL) {
+      emulator.standardOutput = log
+      emulator.standardError = log
+    }
+    emulator.terminationHandler = { _ in DispatchQueue.main.async { NSApp.terminate(nil) } }
+    let fb: FrameBuffer?
+    let socketPath = NSTemporaryDirectory() + "mini-\(getpid()).sock"
+    if qemu, let config {
+      do {
+        let side = max(config.size.width, config.size.height)
+        fb = try FrameBuffer(maxSide: side, count: 2)
+        emulator.executableURL = URL(fileURLWithPath: Qemu.binary)
+        emulator.environment = ProcessInfo.processInfo.environment.merging(["ANDROID_EMU_VK_ICD": "moltenvk"]) { _, new in new }
+        emulator.arguments = try Qemu.arguments(
+          avd: avd, socket: socketPath, shm: fb!.path, log: logURL.deletingPathExtension().path)
+        try emulator.run()
+      } catch { fatal("cannot launch QEMU: \(error.localizedDescription)") }
+      Task.detached { await GuestSetup.afterBoot(refreshHz: config.refreshHz) }
+    } else {
+      fb = nil
+      launchEmulator()
+    }
+    showWindow(fb: fb, socketPath: socketPath)
+  }
+
+  private func launchEmulator() {
     emulator.executableURL = URL(fileURLWithPath: EmulatorSetup.dir + "/emulator")
     // Mini's emulator lives outside the SDK; it still needs the SDK for system images.
     // Canary defaults to KosmicKrisp; force MoltenVK (Mini's private-API build has provoking_vertex and faster readback).
@@ -223,15 +254,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
       ["ANDROID_SDK_ROOT": Prefs.sdk,
        "ANDROID_EMU_VK_SELECT_ICD": ProcessInfo.processInfo.environment["ANDROID_EMU_VK_SELECT_ICD"] ?? "moltenvk"]) { _, new in new }
     emulator.arguments = Prefs.emulatorArgs(avd: avd, grpcPort: grpcPort)
-    try? FileManager.default.createDirectory(at: logURL.deletingLastPathComponent(), withIntermediateDirectories: true)
-    if FileManager.default.createFile(atPath: logURL.path, contents: nil), let log = try? FileHandle(forWritingTo: logURL) {
-      emulator.standardOutput = log
-      emulator.standardError = log
-    }
-    emulator.terminationHandler = { _ in DispatchQueue.main.async { NSApp.terminate(nil) } }
     do { try emulator.run() } catch { fatal("cannot launch emulator: \(error)") }
     liftRefreshCap()
+  }
 
+  private func showWindow(fb: FrameBuffer?, socketPath: String) {
     let (inputs, inputsCont) = AsyncStream.makeStream(of: InputEvent.self)
     let (rotations, rotationsCont) = AsyncStream.makeStream(of: PhysicalModel.self)
     let view = ScreenView(inputs: inputsCont, rotations: rotationsCont)
@@ -248,13 +275,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     window.makeFirstResponder(view)
 
     Task.detached { [weak view, weak self] in
+      let onFrame: @Sendable (CGImage, Android_Emulation_Control_Rotation.SkinRotation) async -> Void = { img, rot in
+        await MainActor.run { view?.show(img, rotation: rot) }
+      }
       do {
-        try await Self.run(inputs: inputs, rotations: rotations) { img, rot in
-          await MainActor.run { view?.show(img, rotation: rot) }
+        if let fb {
+          try await Self.runQemu(fb: fb, socket: socketPath, inputs: inputs, rotations: rotations, onFrame: onFrame)
+        } else {
+          try await Self.run(inputs: inputs, rotations: rotations, onFrame: onFrame)
         }
       } catch {
         // The stream always dies while we shut the emulator down; only alert on unexpected failures.
-        await MainActor.run { if self?.quitting == false { fatal("gRPC: \(error)") } }
+        await MainActor.run { if self?.quitting == false { fatal("\(fb == nil ? "gRPC" : "QEMU display"): \(error)") } }
       }
     }
   }
@@ -367,10 +399,63 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
   }
 
+  /// Frames and input through QEMU's mini-display object (third_party/qemu/ui/mini.c).
+  nonisolated static func runQemu(
+    fb: FrameBuffer, socket path: String, inputs: AsyncStream<InputEvent>, rotations: AsyncStream<PhysicalModel>,
+    onFrame: @escaping @Sendable (CGImage, Android_Emulation_Control_Rotation.SkinRotation) async -> Void
+  ) async throws {
+    // QEMU creates the socket a moment after launch.
+    var fd: Int32 = -1
+    while fd < 0 {
+      fd = socket(AF_UNIX, SOCK_STREAM, 0)
+      var addr = sockaddr_un()
+      addr.sun_family = sa_family_t(AF_UNIX)
+      withUnsafeMutableBytes(of: &addr.sun_path) { _ = path.utf8CString.withUnsafeBytes($0.copyMemory(from:)) }
+      let ok = withUnsafePointer(to: &addr) { $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { connect(fd, $0, socklen_t(MemoryLayout<sockaddr_un>.size)) } }
+      if ok != 0 {
+        close(fd)
+        fd = -1
+        try await Task.sleep(for: .milliseconds(200))
+      }
+    }
+    let link = FileHandle(fileDescriptor: fd, closeOnDealloc: true)
+    try await withThrowingTaskGroup(of: Void.self) { group in
+      group.addTask {
+        for await ev in inputs { for msg in MiniMsg.encode(ev) { try link.write(contentsOf: msg) } }
+      }
+      group.addTask {
+        for await m in rotations { try link.write(contentsOf: MiniMsg.encode(MiniMsg.rotate, Int32(m.value.data[2]))) }
+      }
+      group.addTask {
+        // FrameMsg: width, height, rotation (quarter turns), which of the two frames.
+        var msg: [UInt8] = []
+        for try await byte in link.bytes {
+          msg.append(byte)
+          guard msg.count == 16 else { continue }
+          let f = msg.withUnsafeBytes { raw in (0..<4).map { Int(UInt32(littleEndian: raw.load(fromByteOffset: $0 * 4, as: UInt32.self))) } }
+          msg.removeAll(keepingCapacity: true)
+          if let cg = fb.image(width: f[0], height: f[1], offset: f[3] * fb.size / 2) {
+            await onFrame(cg, .init(rawValue: f[2]) ?? .portrait)
+          }
+        }
+      }
+      try await group.next()
+      group.cancelAll()
+    }
+  }
+
   func applicationWillTerminate(_ note: Notification) {
     quitting = true
     guard emulator.isRunning else { return }
     emulator.terminationHandler = nil
+    if qemu {
+      // Android shuts down and powers the VM off; QEMU itself would just pull the plug on /data.
+      let asked = DispatchSemaphore(value: 0)
+      Task.detached { _ = await GuestSetup.powerOff(); asked.signal() }
+      _ = asked.wait(timeout: .now() + 5)
+      for _ in 0..<150 where emulator.isRunning { usleep(100_000) }
+      if !emulator.isRunning { return }
+    }
     emulator.terminate()  // SIGTERM: the emulator saves its quick-boot snapshot and exits
     emulator.waitUntilExit()
   }

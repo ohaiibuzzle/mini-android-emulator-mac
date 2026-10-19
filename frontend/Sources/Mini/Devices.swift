@@ -36,6 +36,10 @@ struct DeviceConfig: Equatable {
   var freeform = false
   var refreshHz = 60
   var sysdir = BaseImage.sysdir  // read-only after creation
+  var engine = Engine.emulator
+
+  /// Google's emulator, or Mini's patched upstream QEMU (Qemu.swift). Both boot the same image and disks.
+  enum Engine: String { case emulator, qemu }
 
   static let refreshChoices = [60, 90, 120]
 
@@ -49,6 +53,7 @@ struct DeviceConfig: Equatable {
     freeform = ini["display.settings.xml"] == "freeform"
     refreshHz = ini["hw.lcd.vsync"].flatMap(Int.init) ?? refreshHz
     sysdir = ini["image.sysdir.1"] ?? sysdir
+    engine = ini["mini.engine"].flatMap(Engine.init) ?? engine
   }
 
   /// Sizes with an optional M or G suffix. A bare number is MB for hw.ramSize but bytes for
@@ -70,6 +75,7 @@ struct DeviceConfig: Equatable {
       // The emulator turns this into androidboot.qemu.display.settings.xml; Google's provisioning app enables desktop windows.
       "display.settings.xml": freeform ? "freeform" : nil,
       "hw.lcd.vsync": "\(refreshHz)",  // the guest display's only mode; Mini lifts Android's 60 Hz default cap after boot
+      "mini.engine": engine == .qemu ? "qemu" : nil,  // the emulator ignores keys it doesn't know
     ]
   }
 
@@ -265,6 +271,17 @@ struct DevicesView: View {
         TextField("Height (px)", value: $config.size.height, format: .number.grouping(.never))
         TextField("Density (dpi)", value: $config.size.density, format: .number.grouping(.never))
         Text("\(config.size.width * 160 / max(config.size.density, 1)) dp wide").font(.caption).foregroundStyle(.secondary)
+      }
+      Section("Engine") {
+        Picker("Runs on", selection: $config.engine) {
+          Text("Android Emulator").tag(DeviceConfig.Engine.emulator)
+          Text("QEMU (Mini's own)").tag(DeviceConfig.Engine.qemu)
+        }
+        .disabled(!Qemu.installed && config.engine == .emulator)
+        Text(Qemu.installed || config.engine == .qemu
+          ? "Both share this device's data. QEMU has no audio, camera or quick boot, and needs a rootable image for internet."
+          : "QEMU isn't built into this Mini; run scripts/build-qemu.sh.")
+          .font(.caption).foregroundStyle(.secondary)
       }
       Section("Hardware") {
         TextField("Memory (MB)", value: $config.ramMB, format: .number.grouping(.never))

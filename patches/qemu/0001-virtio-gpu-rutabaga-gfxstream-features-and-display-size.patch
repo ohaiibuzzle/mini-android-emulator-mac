@@ -1,0 +1,36 @@
+diff --git a/hw/display/virtio-gpu-rutabaga.c b/hw/display/virtio-gpu-rutabaga.c
+index 041216a..ddbedff 100644
+--- a/hw/display/virtio-gpu-rutabaga.c
++++ b/hw/display/virtio-gpu-rutabaga.c
+@@ -986,6 +986,11 @@ static bool virtio_gpu_rutabaga_init(VirtIOGPU *g, Error **errp)
+     vr->rutabaga = NULL;
+ 
+     builder.wsi = RUTABAGA_WSI_SURFACELESS;
++    /* gfxstream renderer features ("Name:enabled,Name:disabled"), e.g. GuestVulkanOnly. */
++    builder.renderer_features = vr->features;
++    /* gfxstream reports this size to the guest (e.g. Android's composer), so match the scanout. */
++    builder.display_width = g->parent_obj.conf.xres;
++    builder.display_height = g->parent_obj.conf.yres;
+     /*
+      * Currently, if WSI is specified, the only valid strings are "surfaceless"
+      * or "headless".  Surfaceless doesn't create a native window surface, but
+@@ -1146,6 +1151,7 @@ static const Property virtio_gpu_rutabaga_properties[] = {
+     DEFINE_PROP_STRING("wayland-socket-path", VirtIOGPURutabaga,
+                        wayland_socket_path),
+     DEFINE_PROP_STRING("wsi", VirtIOGPURutabaga, wsi),
++    DEFINE_PROP_STRING("x-gfxstream-features", VirtIOGPURutabaga, features),
+ };
+ 
+ static void virtio_gpu_rutabaga_class_init(ObjectClass *klass, const void *data)
+diff --git a/include/hw/virtio/virtio-gpu.h b/include/hw/virtio/virtio-gpu.h
+index 220231e..399c26d 100644
+--- a/include/hw/virtio/virtio-gpu.h
++++ b/include/hw/virtio/virtio-gpu.h
+@@ -294,6 +294,7 @@ struct VirtIOGPURutabaga {
+     uint64_t capset_mask;
+     char *wayland_socket_path;
+     char *wsi;
++    char *features;
+     bool headless;
+     uint32_t num_capsets;
+     struct rutabaga *rutabaga;

@@ -5,7 +5,7 @@ A small Android (goldfish/ranchu) emulator front-end for Apple Silicon. The plan
 ## Status
 - **Phase 1 (done):** prebuilt SDK emulator + API 37 arm64 image, with GPU findings and a device oracle captured locally in `oracle/` (gitignored).
 - **Phase 2 (done):** `frontend/`, a minimal Cocoa window (`Mini`).
-- **Phase 3 (todo):** upstream QEMU + ported goldfish devices.
+- **Phase 3 (works):** Mini's own engine. Upstream QEMU 11.1.2 with `patches/qemu`, plus gfxstream and rutabaga built from source, boots the stock goldfish image with no Google host binaries.
 
 ## Run
 ```sh
@@ -22,6 +22,14 @@ Requires `protoc` (`brew install protobuf`) and Xcode at build time. CI (`.githu
 **Devices** (⇧⌘D) lists your AVDs. From there you can create one from any installed system image, set its screen size, memory, storage (changing it erases the device's data, since the emulator only sizes a fresh data partition), desktop windowing (freeform) and refresh rate (60/90/120 Hz; above 60 Mini lifts Android's 60 Hz default cap over adb after boot), Start it (Mini restarts on it), or move it to the Trash. Mini opens to this window; `--start <avd>` boots that device directly (`open build/Mini.app --args --start goldfish37`). Mini can download Google's API 37 Google APIs image (about 2.2 GB, license shown first, SHA-1 checked) into the SDK.
 
 **Import GSI** (in Devices) turns an arm64 GSI (`.img` or `.img.xz`) into a device. It uses `scripts/gsi-image.py`, which is bundled in Mini.app and needs `brew install lz4 e2fsprogs`. The GSI boots on Google's API 37 kernel, vendor and ramdisk, with no super partition: the stock image's fstab is rewritten to mount plain GPT partitions. The result goes to `system-images/android-37.0/gsi_<name>/`. It contains Google's vendor, so don't redistribute it.
+
+**QEMU engine.** Each device's *Runs on* picker (Devices) chooses Google's emulator or Mini's QEMU. Both use the same image and the same data disks, and starting on QEMU discards the emulator's quick-boot snapshot. `scripts/build-qemu.sh` builds the engine into `third_party/install`; it needs `brew install meson ninja rust pkg-config glib pixman libslirp vulkan-loader`. `bundle.sh` runs it and copies QEMU, with its libraries rewritten to load from inside the app, into `Mini.app/Contents/Resources/qemu`. The patches:
+- `qemu/0001`: gfxstream feature flags and the display size for rutabaga.
+- `qemu/0002`: `android-vsock-pci`, a userspace virtio-vsock device. The goldfish vendor talks to the host over vsock: qemud boot properties and sensors on port 5000, adbd on 5555. The device serves those, including an accelerometer that follows Mini's rotate buttons.
+- `qemu/0003`: `mini-display`. It copies frames, rotated, into a double-buffered shared file that Mini maps, and takes touch, key and rotation messages over a socket.
+- `rutabaga_gfx/0001`: the display size in rutabaga's C interface.
+
+The guest uses ANGLE on gfxstream Vulkan over virtio-gpu, with minigbm gralloc. Mini writes the bootconfig itself (`<avd>.avd/initrd-mini`). After boot it registers the guest with adb as `emulator-5554` and, through `adb root`, wraps eth0 in the guest's `virt_wifi` driver. That driver shows QEMU's user network to Android as the "VirtWifi" access point, since the image only routes through Wi-Fi. A new device on QEMU gets an ext4 data disk made with `mke2fs` (`brew install e2fsprogs`). Quitting runs `svc power shutdown`, so /data unmounts cleanly.
 
 **The AVD needs `hw.keyboard=yes`** in `~/.android/avd/<name>.avd/config.ini`, otherwise the guest has no keyboard device and keys are dropped. `avdmanager` defaults it to `no`.
 
@@ -48,5 +56,6 @@ Frames are letterboxed and never stretched. Clicks are mapped back through the l
 
 ## Known limits
 - Graphics: guest GLES (3.1) runs on **ANGLE in the guest** over gfxstream Vulkan, and gfxstream renders it with **MoltenVK** on the host. Host-side ANGLE would need a gfxstream source build that matches the emulator's exact commit, and 37.x source isn't public. The local `oracle/README.md` has the details.
-- Frames can tear (single shared buffer, no double buffering).
+- Frames can tear on the emulator engine (single shared buffer, no double buffering). On QEMU, every guest flush is copied once on the CPU.
+- QEMU engine: no audio, camera, GPS, modem or quick boot, and the refresh rate stays at the guest default. Overview goes through `adb shell input` (QEMU has no key code for KEY_APPSELECT). Internet needs an image whose adbd allows root: Google APIs images do, Play Store and most GSI user builds don't.
 - Port 8554 is fixed, so you can only run one instance at a time.

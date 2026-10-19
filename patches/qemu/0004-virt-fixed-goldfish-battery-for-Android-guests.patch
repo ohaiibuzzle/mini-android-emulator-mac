@@ -1,0 +1,103 @@
+diff --git a/hw/arm/virt.c b/hw/arm/virt.c
+index 219597c..bc457e4 100644
+--- a/hw/arm/virt.c
++++ b/hw/arm/virt.c
+@@ -211,6 +211,7 @@ static const MemMapEntry base_memmap[] = {
+     [VIRT_PVTIME] =             { 0x090a0000, 0x00010000 },
+     [VIRT_SECURE_GPIO] =        { 0x090b0000, 0x00001000 },
+     [VIRT_ACPI_PCIHP] =         { 0x090c0000, ACPI_PCIHP_SIZE },
++    [VIRT_GOLDFISH_BATTERY] =   { 0x090d0000, 0x00001000 },
+     [VIRT_MMIO] =               { 0x0a000000, 0x00000200 },
+     /* ...repeating for a total of NUM_VIRTIO_TRANSPORTS, each of that size */
+     [VIRT_PLATFORM_BUS] =       { 0x0c000000, 0x02000000 },
+@@ -268,6 +269,7 @@ static const int a15irqmap[] = {
+     [VIRT_UART1] = 8,
+     [VIRT_ACPI_GED] = 9,
+     [VIRT_GWDT_WS0] = 10,
++    [VIRT_GOLDFISH_BATTERY] = 11,
+     [VIRT_MMIO] = 16, /* ...to 16 + NUM_VIRTIO_TRANSPORTS - 1 */
+     [VIRT_GIC_V2M] = 48, /* ...to 48 + NUM_GICV2M_SPIS - 1 */
+     [VIRT_SMMU] = 74,    /* ...to 74 + NUM_SMMU_IRQS - 1 */
+@@ -1576,6 +1578,62 @@ static void create_rtc(const VirtMachineState *vms)
+     g_free(nodename);
+ }
+ 
++/*
++ * goldfish_battery for Android guests: always on AC, charging, at 100%.
++ * Values are fixed, so the interrupt is described but never raised.
++ */
++static uint64_t goldfish_battery_read(void *opaque, hwaddr addr, unsigned size)
++{
++    switch (addr) {
++    case 0x08: return 1;        /* AC_ONLINE */
++    case 0x0c: return 1;        /* STATUS: POWER_SUPPLY_STATUS_CHARGING */
++    case 0x10: return 1;        /* HEALTH: GOOD */
++    case 0x14: return 1;        /* PRESENT */
++    case 0x18: return 100;      /* CAPACITY, % */
++    case 0x1c: return 4200000;  /* VOLTAGE, uV */
++    case 0x20: return 250;      /* TEMP, 0.1 C */
++    case 0x24: return 4000000;  /* CHARGE_COUNTER, uAh */
++    case 0x28: return 5000000;  /* AC VOLTAGE_MAX, uV */
++    case 0x2c: return 2000000;  /* AC CURRENT_MAX, uA */
++    case 0x30: return 500000;   /* CURRENT_NOW, uA */
++    case 0x34: return 500000;   /* CURRENT_AVG, uA */
++    case 0x38: return 4000000;  /* CHARGE_FULL_UAH */
++    default:   return 0;        /* INT_STATUS, INT_ENABLE, CYCLE_COUNT */
++    }
++}
++
++static void goldfish_battery_write(void *opaque, hwaddr addr, uint64_t val, unsigned size)
++{
++}
++
++static const MemoryRegionOps goldfish_battery_ops = {
++    .read = goldfish_battery_read,
++    .write = goldfish_battery_write,
++    .endianness = DEVICE_LITTLE_ENDIAN,
++    .valid = { .min_access_size = 4, .max_access_size = 4 },
++};
++
++static void create_goldfish_battery(const VirtMachineState *vms, MemoryRegion *mem)
++{
++    hwaddr base = vms->memmap[VIRT_GOLDFISH_BATTERY].base;
++    hwaddr size = vms->memmap[VIRT_GOLDFISH_BATTERY].size;
++    MachineState *ms = MACHINE(vms);
++    MemoryRegion *mr = g_new(MemoryRegion, 1);
++    char *nodename;
++
++    memory_region_init_io(mr, OBJECT(vms), &goldfish_battery_ops, NULL, "goldfish-battery", size);
++    memory_region_add_subregion(mem, base, mr);
++
++    nodename = g_strdup_printf("/goldfish_battery@%" PRIx64, base);
++    qemu_fdt_add_subnode(ms->fdt, nodename);
++    qemu_fdt_setprop_string(ms->fdt, nodename, "compatible", "google,goldfish-battery");
++    qemu_fdt_setprop_sized_cells(ms->fdt, nodename, "reg", 2, base, 2, size);
++    qemu_fdt_setprop_cells(ms->fdt, nodename, "interrupts",
++                           gic_fdt_irq_type_spi(vms), vms->irqmap[VIRT_GOLDFISH_BATTERY],
++                           GIC_FDT_IRQ_FLAGS_LEVEL_HI);
++    g_free(nodename);
++}
++
+ static DeviceState *gpio_key_dev;
+ static void virt_powerdown_req(Notifier *n, void *opaque)
+ {
+@@ -3207,6 +3265,7 @@ static void machvirt_init(MachineState *machine)
+     vms->highmem_ecam &= (!firmware_loaded || aarch64);
+ 
+     create_rtc(vms);
++    create_goldfish_battery(vms, sysmem);
+ 
+     create_pcie(vms);
+     create_cxl_host_reg_region(vms);
+diff --git a/include/hw/arm/virt.h b/include/hw/arm/virt.h
+index 22e66d1..9e27e1c 100644
+--- a/include/hw/arm/virt.h
++++ b/include/hw/arm/virt.h
+@@ -100,6 +100,7 @@ enum {
+     VIRT_GWDT_WS0,
+     VIRT_GWDT_REFRESH,
+     VIRT_GWDT_CONTROL,
++    VIRT_GOLDFISH_BATTERY,
+     VIRT_LOWMEMMAP_LAST,
+ };
+ 

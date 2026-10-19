@@ -1,0 +1,661 @@
+diff --git a/hw/virtio/Kconfig b/hw/virtio/Kconfig
+index 91cf833..9a13ae8 100644
+--- a/hw/virtio/Kconfig
++++ b/hw/virtio/Kconfig
+@@ -81,6 +81,11 @@ config VIRTIO_RTC
+     default y
+     depends on VIRTIO
+ 
++config ANDROID_VSOCK
++    bool
++    default y
++    depends on VIRTIO_PCI
++
+ config VHOST_VSOCK_COMMON
+     bool
+     depends on VIRTIO
+diff --git a/hw/virtio/meson.build b/hw/virtio/meson.build
+index 0e02323..3ddbd5c 100644
+--- a/hw/virtio/meson.build
++++ b/hw/virtio/meson.build
+@@ -67,6 +67,7 @@ system_virtio_ss.add(when: 'CONFIG_VHOST_USER_SCMI', if_true: files('vhost-user-
+ 
+ virtio_pci_ss = ss.source_set()
+ virtio_pci_ss.add(when: 'CONFIG_VHOST_VSOCK', if_true: files('vhost-vsock-pci.c'))
++virtio_pci_ss.add(when: 'CONFIG_ANDROID_VSOCK', if_true: files('virtio-vsock-android.c'))
+ virtio_pci_ss.add(when: 'CONFIG_VHOST_USER_VSOCK', if_true: files('vhost-user-vsock-pci.c'))
+ virtio_pci_ss.add(when: 'CONFIG_VHOST_USER_BLK', if_true: files('vhost-user-blk-pci.c'))
+ virtio_pci_ss.add(when: 'CONFIG_VHOST_USER_SCSI', if_true: files('vhost-user-scsi-pci.c'))
+diff --git a/hw/virtio/virtio-vsock-android.c b/hw/virtio/virtio-vsock-android.c
+new file mode 100644
+index 0000000..488a64f
+--- /dev/null
++++ b/hw/virtio/virtio-vsock-android.c
+@@ -0,0 +1,627 @@
++/*
++ * android-vsock: a userspace virtio-vsock device for Android's goldfish images.
++ *
++ * Upstream QEMU only has vhost-vsock (Linux hosts). This device implements the
++ * virtio-vsock stream protocol itself and serves the two things the goldfish
++ * vendor image uses vsock for:
++ *  - guest -> host port 5000: qemud services over the pipe handshake
++ *    ("pipe:qemud:<service>\0", then 4-hex-digit framed messages). Only
++ *    "boot-properties" (qemu-props) and "sensors" (sensors HAL) are served;
++ *    anything else is reset so its client gives up or falls back.
++ *    The accelerometer follows the "rotation" property (degrees the device
++ *    is turned counter-clockwise), so Mini's rotate buttons reorient the guest.
++ *  - host -> guest port 5555 (adbd): bridged to the "adb" chardev, so
++ *    `-chardev socket,id=adb,host=127.0.0.1,port=5555,server=on,wait=off`
++ *    lets the host adb server find the guest like an emulator.
++ *
++ * SPDX-License-Identifier: GPL-2.0-or-later
++ */
++
++#include "qemu/osdep.h"
++#include "qapi/error.h"
++#include "qemu/iov.h"
++#include "qemu/log.h"
++#include "qemu/module.h"
++#include "qemu/timer.h"
++#include <math.h>
++#include "hw/virtio/virtio.h"
++#include "hw/virtio/virtio-pci.h"
++#include "hw/core/qdev-properties.h"
++#include "hw/core/qdev-properties-system.h"
++#include "chardev/char-fe.h"
++#include "standard-headers/linux/virtio_ids.h"
++#include "standard-headers/linux/virtio_vsock.h"
++#include "qom/object.h"
++
++#define TYPE_ANDROID_VSOCK "android-vsock-device"
++OBJECT_DECLARE_SIMPLE_TYPE(AndroidVsock, ANDROID_VSOCK)
++
++#define HOST_CID 2
++#define QEMUD_PORT 5000
++#define QUEUE_SIZE 128
++#define BUF_ALLOC (256 * 1024)  /* receive buffer we advertise per connection */
++
++typedef enum { SVC_CONNECTING, SVC_BOOT_PROPERTIES, SVC_SENSORS } Service;
++
++typedef struct Conn {
++    uint32_t local_port, peer_port;  /* host side, guest side */
++    bool connected;                  /* REQUEST/RESPONSE done */
++    bool adb;                        /* bridged to the adb chardev */
++    Service svc;
++    GByteArray *in;                  /* guest bytes a service hasn't consumed */
++    GByteArray *out;                 /* bytes waiting to go to the guest */
++    uint32_t peer_buf_alloc, peer_fwd_cnt, tx_cnt;
++    uint32_t fwd_cnt, fwd_cnt_sent;
++} Conn;
++
++struct AndroidVsock {
++    VirtIODevice parent_obj;
++    VirtQueue *rx, *tx, *ev;
++
++    uint64_t guest_cid;
++    char *boot_props;      /* "name=value;name=value" for boot-properties */
++    uint32_t sensors;      /* host sensors mask answered to list-sensors */
++    CharFrontend adb;
++    uint32_t adb_port;
++
++    GList *conns;
++    GQueue ctrl;           /* struct virtio_vsock_hdr * waiting for rx buffers */
++    Conn *adb_conn;
++    uint32_t next_port;
++    QEMUTimer *adb_retry;      /* adbd isn't listening yet: ask again */
++
++    Conn *sensors_conn;        /* the HAL, once it enabled the accelerometer */
++    uint32_t sensors_delay_ms;
++    uint32_t rotation;
++    QEMUTimer *sensors_timer;
++};
++
++static uint32_t conn_credit(Conn *c)
++{
++    return c->peer_buf_alloc - (c->tx_cnt - c->peer_fwd_cnt);
++}
++
++static void queue_ctrl(AndroidVsock *s, uint32_t local, uint32_t peer,
++                       uint16_t op, uint32_t flags, Conn *c)
++{
++    struct virtio_vsock_hdr *h = g_new0(struct virtio_vsock_hdr, 1);
++    h->src_cid = cpu_to_le64(HOST_CID);
++    h->dst_cid = cpu_to_le64(s->guest_cid);
++    h->src_port = cpu_to_le32(local);
++    h->dst_port = cpu_to_le32(peer);
++    h->type = cpu_to_le16(VIRTIO_VSOCK_TYPE_STREAM);
++    h->op = cpu_to_le16(op);
++    h->flags = cpu_to_le32(flags);
++    h->buf_alloc = cpu_to_le32(BUF_ALLOC);
++    if (c) {
++        h->fwd_cnt = cpu_to_le32(c->fwd_cnt);
++        c->fwd_cnt_sent = c->fwd_cnt;
++    }
++    g_queue_push_tail(&s->ctrl, h);
++}
++
++static Conn *conn_new(AndroidVsock *s, uint32_t local, uint32_t peer)
++{
++    Conn *c = g_new0(Conn, 1);
++    c->local_port = local;
++    c->peer_port = peer;
++    c->in = g_byte_array_new();
++    c->out = g_byte_array_new();
++    s->conns = g_list_prepend(s->conns, c);
++    return c;
++}
++
++static Conn *conn_find(AndroidVsock *s, uint32_t local, uint32_t peer)
++{
++    for (GList *l = s->conns; l; l = l->next) {
++        Conn *c = l->data;
++        if (c->local_port == local && c->peer_port == peer) {
++            return c;
++        }
++    }
++    return NULL;
++}
++
++static void conn_free(AndroidVsock *s, Conn *c)
++{
++    s->conns = g_list_remove(s->conns, c);
++    if (c == s->adb_conn) {
++        s->adb_conn = NULL;
++        qemu_chr_fe_disconnect(&s->adb);
++    }
++    if (c == s->sensors_conn) {
++        s->sensors_conn = NULL;
++    }
++    g_byte_array_free(c->in, true);
++    g_byte_array_free(c->out, true);
++    g_free(c);
++}
++
++/* Sends queued control packets, then data, while the guest has rx buffers. */
++static void flush(AndroidVsock *s)
++{
++    VirtIODevice *vdev = VIRTIO_DEVICE(s);
++    bool pushed = false;
++
++    if (!virtio_queue_ready(s->rx)) {
++        return;
++    }
++    for (;;) {
++        struct virtio_vsock_hdr *ctrl = g_queue_peek_head(&s->ctrl);
++        Conn *data = NULL;
++        if (!ctrl) {
++            for (GList *l = s->conns; l; l = l->next) {
++                Conn *c = l->data;
++                if (c->connected && c->out->len && conn_credit(c)) {
++                    data = c;
++                    break;
++                }
++            }
++            if (!data) {
++                break;
++            }
++        }
++        VirtQueueElement *elem = virtqueue_pop(s->rx, sizeof(VirtQueueElement));
++        if (!elem) {
++            break;
++        }
++        size_t room = iov_size(elem->in_sg, elem->in_num);
++        if (room < sizeof(struct virtio_vsock_hdr)) {
++            virtqueue_detach_element(s->rx, elem, 0);
++            g_free(elem);
++            break;
++        }
++        size_t len = sizeof(struct virtio_vsock_hdr);
++        if (ctrl) {
++            iov_from_buf(elem->in_sg, elem->in_num, 0, ctrl, sizeof(*ctrl));
++            g_free(g_queue_pop_head(&s->ctrl));
++        } else {
++            uint32_t n = MIN(MIN(data->out->len, conn_credit(data)),
++                             room - sizeof(struct virtio_vsock_hdr));
++            struct virtio_vsock_hdr h = {
++                .src_cid = cpu_to_le64(HOST_CID),
++                .dst_cid = cpu_to_le64(s->guest_cid),
++                .src_port = cpu_to_le32(data->local_port),
++                .dst_port = cpu_to_le32(data->peer_port),
++                .len = cpu_to_le32(n),
++                .type = cpu_to_le16(VIRTIO_VSOCK_TYPE_STREAM),
++                .op = cpu_to_le16(VIRTIO_VSOCK_OP_RW),
++                .buf_alloc = cpu_to_le32(BUF_ALLOC),
++                .fwd_cnt = cpu_to_le32(data->fwd_cnt),
++            };
++            iov_from_buf(elem->in_sg, elem->in_num, 0, &h, sizeof(h));
++            iov_from_buf(elem->in_sg, elem->in_num, sizeof(h), data->out->data, n);
++            g_byte_array_remove_range(data->out, 0, n);
++            data->tx_cnt += n;
++            data->fwd_cnt_sent = data->fwd_cnt;
++            len += n;
++        }
++        virtqueue_push(s->rx, elem, len);
++        g_free(elem);
++        pushed = true;
++    }
++    if (pushed) {
++        virtio_notify(vdev, s->rx);
++    }
++    if (s->adb_conn && s->adb_conn->connected) {
++        qemu_chr_fe_accept_input(&s->adb);
++    }
++}
++
++/* qemud framing: 4 hex digits of length, then the payload. */
++static void qemud_send(Conn *c, const char *msg, size_t len)
++{
++    char hdr[5];
++    snprintf(hdr, sizeof(hdr), "%04zx", len);
++    g_byte_array_append(c->out, (const guint8 *)hdr, 4);
++    g_byte_array_append(c->out, (const guint8 *)msg, len);
++}
++
++static void qemud_message(AndroidVsock *s, Conn *c, const char *msg, size_t len)
++{
++    if (c->svc == SVC_BOOT_PROPERTIES && len == 4 && !memcmp(msg, "list", 4)) {
++        g_auto(GStrv) props = g_strsplit(s->boot_props ?: "", ";", -1);
++        for (char **p = props; *p; p++) {
++            if (**p) {
++                qemud_send(c, *p, strlen(*p));
++            }
++        }
++        qemud_send(c, "", 1);  /* a lone NUL ends the list */
++    } else if (c->svc == SVC_SENSORS && len == 12 && !memcmp(msg, "list-sensors", 12)) {
++        g_autofree char *mask = g_strdup_printf("%u", s->sensors);
++        qemud_send(c, mask, strlen(mask));
++    } else if (c->svc == SVC_SENSORS) {
++        g_autofree char *m = g_strndup(msg, len);
++        unsigned v;
++        if (!strcmp(m, "set:acceleration:1")) {
++            s->sensors_conn = c;
++            timer_mod(s->sensors_timer, qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL));
++        } else if (!strcmp(m, "set:acceleration:0") && s->sensors_conn == c) {
++            s->sensors_conn = NULL;
++        } else if (sscanf(m, "set-delay:%u", &v) == 1) {
++            s->sensors_delay_ms = MAX(v, 20);  /* the orientation listener needs no more */
++        }
++    }
++    /* Anything else (time sync, other sensors) needs no reply. */
++}
++
++/* Consumes what it can of c->in; false if the guest asked for a service we don't serve. */
++static bool qemud_process(AndroidVsock *s, Conn *c)
++{
++    if (c->svc == SVC_CONNECTING) {
++        guint8 *nul = memchr(c->in->data, 0, c->in->len);
++        if (!nul) {
++            return true;
++        }
++        const char *name = (const char *)c->in->data;
++        if (!strcmp(name, "pipe:qemud:boot-properties")) {
++            c->svc = SVC_BOOT_PROPERTIES;
++        } else if (!strcmp(name, "pipe:qemud:sensors")) {
++            c->svc = SVC_SENSORS;
++        } else {
++            qemu_log_mask(LOG_UNIMP, "android-vsock: no service for '%s'\n", name);
++            return false;
++        }
++        g_byte_array_remove_range(c->in, 0, nul - c->in->data + 1);
++    }
++    while (c->in->len >= 4) {
++        char hdr[5] = { 0 };
++        unsigned len;
++        memcpy(hdr, c->in->data, 4);
++        if (sscanf(hdr, "%04x", &len) != 1) {
++            return false;
++        }
++        if (c->in->len < 4 + len) {
++            break;
++        }
++        qemud_message(s, c, (const char *)c->in->data + 4, len);
++        g_byte_array_remove_range(c->in, 0, 4 + len);
++    }
++    return true;
++}
++
++static void handle_packet(AndroidVsock *s, struct virtio_vsock_hdr *h,
++                          const uint8_t *payload, uint32_t len)
++{
++    uint32_t local = le32_to_cpu(h->dst_port), peer = le32_to_cpu(h->src_port);
++    uint16_t op = le16_to_cpu(h->op);
++    Conn *c = conn_find(s, local, peer);
++
++    if (le16_to_cpu(h->type) != VIRTIO_VSOCK_TYPE_STREAM ||
++        le64_to_cpu(h->dst_cid) != HOST_CID) {
++        if (op != VIRTIO_VSOCK_OP_RST) {
++            queue_ctrl(s, local, peer, VIRTIO_VSOCK_OP_RST, 0, NULL);
++        }
++        return;
++    }
++    if (c) {
++        c->peer_buf_alloc = le32_to_cpu(h->buf_alloc);
++        c->peer_fwd_cnt = le32_to_cpu(h->fwd_cnt);
++    }
++
++    switch (op) {
++    case VIRTIO_VSOCK_OP_REQUEST:
++        if (c || local != QEMUD_PORT) {
++            queue_ctrl(s, local, peer, VIRTIO_VSOCK_OP_RST, 0, NULL);
++            break;
++        }
++        c = conn_new(s, local, peer);
++        c->peer_buf_alloc = le32_to_cpu(h->buf_alloc);
++        c->peer_fwd_cnt = le32_to_cpu(h->fwd_cnt);
++        c->connected = true;
++        queue_ctrl(s, local, peer, VIRTIO_VSOCK_OP_RESPONSE, 0, c);
++        break;
++    case VIRTIO_VSOCK_OP_RESPONSE:
++        if (c && c->adb) {
++            c->connected = true;
++        } else {
++            queue_ctrl(s, local, peer, VIRTIO_VSOCK_OP_RST, 0, NULL);
++        }
++        break;
++    case VIRTIO_VSOCK_OP_RW:
++        if (!c || !c->connected) {
++            queue_ctrl(s, local, peer, VIRTIO_VSOCK_OP_RST, 0, NULL);
++            break;
++        }
++        c->fwd_cnt += len;
++        if (c->adb) {
++            /* shortcut: blocks if the host side is slow; fine for adb's traffic. */
++            qemu_chr_fe_write_all(&s->adb, payload, len);
++        } else {
++            g_byte_array_append(c->in, payload, len);
++            if (!qemud_process(s, c)) {
++                queue_ctrl(s, local, peer, VIRTIO_VSOCK_OP_RST, 0, NULL);
++                conn_free(s, c);
++                break;
++            }
++        }
++        if (c->fwd_cnt - c->fwd_cnt_sent > BUF_ALLOC / 2) {
++            queue_ctrl(s, local, peer, VIRTIO_VSOCK_OP_CREDIT_UPDATE, 0, c);
++        }
++        break;
++    case VIRTIO_VSOCK_OP_SHUTDOWN:
++        queue_ctrl(s, local, peer, VIRTIO_VSOCK_OP_RST, 0, NULL);
++        if (c) {
++            conn_free(s, c);
++        }
++        break;
++    case VIRTIO_VSOCK_OP_RST:
++        if (c && c->adb && !c->connected) {
++            /* adbd isn't up yet; keep the host side open and retry. */
++            s->conns = g_list_remove(s->conns, c);
++            s->adb_conn = NULL;
++            g_byte_array_free(c->in, true);
++            g_byte_array_free(c->out, true);
++            g_free(c);
++            timer_mod(s->adb_retry, qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL) + 1000);
++        } else if (c) {
++            conn_free(s, c);
++        }
++        break;
++    case VIRTIO_VSOCK_OP_CREDIT_REQUEST:
++        if (c) {
++            queue_ctrl(s, local, peer, VIRTIO_VSOCK_OP_CREDIT_UPDATE, 0, c);
++        }
++        break;
++    case VIRTIO_VSOCK_OP_CREDIT_UPDATE:
++        break;  /* credit already taken from the header */
++    default:
++        queue_ctrl(s, local, peer, VIRTIO_VSOCK_OP_RST, 0, NULL);
++    }
++}
++
++/* Gravity as a phone turned counter-clockwise by `rotation` degrees feels it. */
++static void sensors_tick(void *opaque)
++{
++    AndroidVsock *s = opaque;
++    Conn *c = s->sensors_conn;
++
++    if (!c) {
++        return;
++    }
++    double a = s->rotation * G_PI / 180;
++    g_autofree char *msg = g_strdup_printf("acceleration:%.4f:%.4f:%.4f",
++                                           9.81 * sin(a), 9.81 * cos(a), 0.0);
++    qemud_send(c, msg, strlen(msg));
++    flush(s);
++    timer_mod(s->sensors_timer,
++              qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL) + (s->sensors_delay_ms ?: 200));
++}
++
++static void handle_tx(VirtIODevice *vdev, VirtQueue *vq)
++{
++    AndroidVsock *s = ANDROID_VSOCK(vdev);
++    VirtQueueElement *elem;
++
++    while ((elem = virtqueue_pop(vq, sizeof(VirtQueueElement)))) {
++        struct virtio_vsock_hdr h;
++        size_t total = iov_size(elem->out_sg, elem->out_num);
++        if (iov_to_buf(elem->out_sg, elem->out_num, 0, &h, sizeof(h)) == sizeof(h)) {
++            uint32_t len = MIN(le32_to_cpu(h.len), total - sizeof(h));
++            g_autofree uint8_t *payload = g_malloc(len);
++            iov_to_buf(elem->out_sg, elem->out_num, sizeof(h), payload, len);
++            handle_packet(s, &h, payload, len);
++        }
++        virtqueue_push(vq, elem, 0);
++        g_free(elem);
++    }
++    virtio_notify(vdev, vq);
++    flush(s);
++}
++
++static void handle_rx(VirtIODevice *vdev, VirtQueue *vq)
++{
++    flush(ANDROID_VSOCK(vdev));
++}
++
++static void handle_event(VirtIODevice *vdev, VirtQueue *vq)
++{
++}
++
++static int adb_can_read(void *opaque)
++{
++    AndroidVsock *s = opaque;
++    Conn *c = s->adb_conn;
++
++    if (!c || !c->connected || conn_credit(c) <= c->out->len) {
++        return 0;
++    }
++    return MIN(conn_credit(c) - c->out->len, 64 * 1024);
++}
++
++static void adb_read(void *opaque, const uint8_t *buf, int size)
++{
++    AndroidVsock *s = opaque;
++
++    if (s->adb_conn) {
++        g_byte_array_append(s->adb_conn->out, buf, size);
++        flush(s);
++    }
++}
++
++static void adb_event(void *opaque, QEMUChrEvent event)
++{
++    AndroidVsock *s = opaque;
++    Conn *c = s->adb_conn;
++
++    if (event == CHR_EVENT_OPENED && !c) {
++        timer_del(s->adb_retry);
++        /* The host adb server connected: open a stream to the guest's adbd. */
++        c = conn_new(s, s->next_port++, s->adb_port);
++        c->adb = true;
++        s->adb_conn = c;
++        queue_ctrl(s, c->local_port, c->peer_port, VIRTIO_VSOCK_OP_REQUEST, 0, c);
++        flush(s);
++    } else if (event == CHR_EVENT_CLOSED && c) {
++        queue_ctrl(s, c->local_port, c->peer_port, VIRTIO_VSOCK_OP_RST, 0, NULL);
++        s->adb_conn = NULL;  /* already disconnected; don't disconnect again */
++        conn_free(s, c);
++        flush(s);
++    } else if (event == CHR_EVENT_CLOSED) {
++        timer_del(s->adb_retry);
++    }
++}
++
++static void adb_retry(void *opaque)
++{
++    adb_event(opaque, CHR_EVENT_OPENED);
++}
++
++static void android_vsock_reset(VirtIODevice *vdev)
++{
++    AndroidVsock *s = ANDROID_VSOCK(vdev);
++
++    while (s->conns) {
++        conn_free(s, s->conns->data);
++    }
++    while (!g_queue_is_empty(&s->ctrl)) {
++        g_free(g_queue_pop_head(&s->ctrl));
++    }
++}
++
++static void android_vsock_get_config(VirtIODevice *vdev, uint8_t *config)
++{
++    AndroidVsock *s = ANDROID_VSOCK(vdev);
++    struct virtio_vsock_config cfg = {
++        .guest_cid = cpu_to_le64(s->guest_cid),  /* virtio-1 only: always LE */
++    };
++
++    memcpy(config, &cfg, sizeof(cfg));
++}
++
++static uint64_t android_vsock_get_features(VirtIODevice *vdev, uint64_t f,
++                                           Error **errp)
++{
++    return f;
++}
++
++static void android_vsock_realize(DeviceState *dev, Error **errp)
++{
++    VirtIODevice *vdev = VIRTIO_DEVICE(dev);
++    AndroidVsock *s = ANDROID_VSOCK(dev);
++
++    if (s->guest_cid <= HOST_CID || s->guest_cid > UINT32_MAX) {
++        error_setg(errp, "guest-cid must be between 3 and %u", UINT32_MAX);
++        return;
++    }
++    virtio_init(vdev, VIRTIO_ID_VSOCK, sizeof(struct virtio_vsock_config));
++    s->rx = virtio_add_queue(vdev, QUEUE_SIZE, handle_rx);
++    s->tx = virtio_add_queue(vdev, QUEUE_SIZE, handle_tx);
++    s->ev = virtio_add_queue(vdev, QUEUE_SIZE, handle_event);
++    g_queue_init(&s->ctrl);
++    s->next_port = 1024;
++    s->adb_retry = timer_new_ms(QEMU_CLOCK_VIRTUAL, adb_retry, s);
++    s->sensors_timer = timer_new_ms(QEMU_CLOCK_VIRTUAL, sensors_tick, s);
++    if (qemu_chr_fe_backend_connected(&s->adb)) {
++        qemu_chr_fe_set_handlers(&s->adb, adb_can_read, adb_read, adb_event,
++                                 NULL, s, NULL, true);
++    }
++}
++
++static void android_vsock_unrealize(DeviceState *dev)
++{
++    VirtIODevice *vdev = VIRTIO_DEVICE(dev);
++    AndroidVsock *s = ANDROID_VSOCK(dev);
++
++    android_vsock_reset(vdev);
++    timer_free(s->adb_retry);
++    timer_free(s->sensors_timer);
++    qemu_chr_fe_deinit(&s->adb, false);
++    virtio_delete_queue(s->rx);
++    virtio_delete_queue(s->tx);
++    virtio_delete_queue(s->ev);
++    virtio_cleanup(vdev);
++}
++
++static const Property android_vsock_properties[] = {
++    DEFINE_PROP_UINT64("guest-cid", AndroidVsock, guest_cid, 3),
++    DEFINE_PROP_STRING("boot-props", AndroidVsock, boot_props),
++    DEFINE_PROP_UINT32("sensors", AndroidVsock, sensors, 0),
++    DEFINE_PROP_CHR("adb", AndroidVsock, adb),
++    DEFINE_PROP_UINT32("adb-port", AndroidVsock, adb_port, 5555),
++};
++
++static void android_vsock_class_init(ObjectClass *klass, const void *data)
++{
++    DeviceClass *dc = DEVICE_CLASS(klass);
++    VirtioDeviceClass *vdc = VIRTIO_DEVICE_CLASS(klass);
++
++    device_class_set_props(dc, android_vsock_properties);
++    set_bit(DEVICE_CATEGORY_MISC, dc->categories);
++    vdc->realize = android_vsock_realize;
++    vdc->unrealize = android_vsock_unrealize;
++    vdc->get_config = android_vsock_get_config;
++    vdc->get_features = android_vsock_get_features;
++    vdc->reset = android_vsock_reset;
++}
++
++/* Settable while running (qom-set, or mini-display's rotate). */
++static void android_vsock_instance_init(Object *obj)
++{
++    object_property_add_uint32_ptr(obj, "rotation", &ANDROID_VSOCK(obj)->rotation,
++                                   OBJ_PROP_FLAG_READWRITE);
++}
++
++static const TypeInfo android_vsock_info = {
++    .name = TYPE_ANDROID_VSOCK,
++    .parent = TYPE_VIRTIO_DEVICE,
++    .instance_size = sizeof(AndroidVsock),
++    .instance_init = android_vsock_instance_init,
++    .class_init = android_vsock_class_init,
++};
++
++/* PCI transport */
++
++#define TYPE_ANDROID_VSOCK_PCI "android-vsock-pci-base"
++OBJECT_DECLARE_SIMPLE_TYPE(AndroidVsockPCI, ANDROID_VSOCK_PCI)
++
++struct AndroidVsockPCI {
++    VirtIOPCIProxy parent_obj;
++    AndroidVsock vdev;
++};
++
++static void android_vsock_pci_realize(VirtIOPCIProxy *vpci_dev, Error **errp)
++{
++    AndroidVsockPCI *dev = ANDROID_VSOCK_PCI(vpci_dev);
++
++    virtio_pci_force_virtio_1(vpci_dev);
++    qdev_realize(DEVICE(&dev->vdev), BUS(&vpci_dev->bus), errp);
++}
++
++static void android_vsock_pci_class_init(ObjectClass *klass, const void *data)
++{
++    DeviceClass *dc = DEVICE_CLASS(klass);
++    VirtioPCIClass *k = VIRTIO_PCI_CLASS(klass);
++    PCIDeviceClass *pcidev_k = PCI_DEVICE_CLASS(klass);
++
++    k->realize = android_vsock_pci_realize;
++    set_bit(DEVICE_CATEGORY_MISC, dc->categories);
++    pcidev_k->vendor_id = PCI_VENDOR_ID_REDHAT_QUMRANET;
++    pcidev_k->device_id = PCI_DEVICE_ID_VIRTIO_VSOCK;
++    pcidev_k->revision = 0x00;
++    pcidev_k->class_id = PCI_CLASS_COMMUNICATION_OTHER;
++}
++
++static void android_vsock_pci_instance_init(Object *obj)
++{
++    AndroidVsockPCI *dev = ANDROID_VSOCK_PCI(obj);
++
++    virtio_instance_init_common(obj, &dev->vdev, sizeof(dev->vdev),
++                                TYPE_ANDROID_VSOCK);
++}
++
++static const VirtioPCIDeviceTypeInfo android_vsock_pci_info = {
++    .base_name = TYPE_ANDROID_VSOCK_PCI,
++    .generic_name = "android-vsock-pci",
++    .instance_size = sizeof(AndroidVsockPCI),
++    .instance_init = android_vsock_pci_instance_init,
++    .class_init = android_vsock_pci_class_init,
++};
++
++static void android_vsock_register(void)
++{
++    type_register_static(&android_vsock_info);
++    virtio_pci_types_register(&android_vsock_pci_info);
++}
++
++type_init(android_vsock_register)
