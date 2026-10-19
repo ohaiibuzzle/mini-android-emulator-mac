@@ -35,8 +35,12 @@ struct SDKDownload: Sendable {
     var observation: NSKeyValueObservation?
     defer { observation?.invalidate() }
 
+    // Asked for gzip, dl.google.com re-compresses the zip on the fly and sends the gzipped length, so URLSession can't
+    // know the size and its progress races to the end on a made-up curve.
+    var request = URLRequest(url: zipURL)
+    request.setValue("identity", forHTTPHeaderField: "Accept-Encoding")
     try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
-      let task = URLSession.shared.downloadTask(with: zipURL) { tmp, response, error in
+      let task = URLSession.shared.downloadTask(with: request) { tmp, response, error in
         // The temp file is deleted when this handler returns, so move it now.
         let status = (response as? HTTPURLResponse)?.statusCode ?? 0
         guard let tmp, status == 200 else { return cont.resume(throwing: error ?? SetupError("download failed: HTTP \(status)")) }
@@ -54,9 +58,11 @@ struct SDKDownload: Sendable {
     guard actual == sha1 else { throw SetupError("checksum mismatch: got \(actual), expected \(sha1)") }
 
     try? fm.removeItem(at: staging)
-    let ditto = try Process.run(URL(fileURLWithPath: "/usr/bin/ditto"), arguments: ["-x", "-k", zip.path, staging.path])
-    ditto.waitUntilExit()
-    guard ditto.terminationStatus == 0 else { throw SetupError("unzip failed (ditto exit \(ditto.terminationStatus))") }
+    try fm.createDirectory(at: staging, withIntermediateDirectories: true)
+    // bsdtar (libarchive), not ditto: ditto loses its place after a ZIP64 entry (system.img is 4.4 GB).
+    let unzip = try Process.run(URL(fileURLWithPath: "/usr/bin/bsdtar"), arguments: ["-xf", zip.path, "-C", staging.path])
+    unzip.waitUntilExit()
+    guard unzip.terminationStatus == 0 else { throw SetupError("unzip failed (bsdtar exit \(unzip.terminationStatus))") }
     let top = try fm.contentsOfDirectory(at: staging, includingPropertiesForKeys: nil).filter { $0.hasDirectoryPath }
     guard top.count == 1 else { throw SetupError("expected one top-level directory in \(zipURL.lastPathComponent)") }
     try prepare(top[0])
@@ -139,6 +145,7 @@ struct SetupView: View {
       .frame(height: 320)
       .background(.background.secondary)
       if let progress { ProgressView(value: progress) }
+      if progress == 1 { Text("Verifying and unpacking…").font(.caption).foregroundStyle(.secondary) }
       if let status { Text(status).font(.caption).foregroundStyle(.secondary) }
       HStack {
         Spacer()
