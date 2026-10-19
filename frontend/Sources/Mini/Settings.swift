@@ -10,12 +10,43 @@ enum Prefs {
   static let debugLogs = "debugLogs"
   static let avd = "avd"
 
+  static var sdk: String { ProcessInfo.processInfo.environment["ANDROID_HOME"] ?? NSHomeDirectory() + "/Library/Android/sdk" }
+  static var avdHome: String { ProcessInfo.processInfo.environment["ANDROID_AVD_HOME"] ?? NSHomeDirectory() + "/.android/avd" }
+
   /// AVD names from the avd home (`*.ini` next to each `*.avd` directory).
   static func avds() -> [String] {
-    let env = ProcessInfo.processInfo.environment
-    let dir = env["ANDROID_AVD_HOME"] ?? NSHomeDirectory() + "/.android/avd"
-    let files = (try? FileManager.default.contentsOfDirectory(atPath: dir)) ?? []
+    let files = (try? FileManager.default.contentsOfDirectory(atPath: avdHome)) ?? []
     return files.filter { $0.hasSuffix(".ini") }.map { String($0.dropLast(4)) }.sorted()
+  }
+
+  /// The AVD's own hardware config; `<name>.ini` says where its directory is.
+  static func configPath(avd: String) -> String {
+    let pointer = try? String(contentsOfFile: "\(avdHome)/\(avd).ini", encoding: .utf8)
+    let dir = pointer.flatMap { ini($0)["path"] } ?? "\(avdHome)/\(avd).avd"
+    return dir + "/config.ini"
+  }
+
+  static func ini(_ text: String) -> [String: String] {
+    var out: [String: String] = [:]
+    for line in text.split(separator: "\n") {
+      guard let eq = line.firstIndex(of: "=") else { continue }
+      out[line[..<eq].trimmingCharacters(in: .whitespaces)] = line[line.index(after: eq)...].trimmingCharacters(in: .whitespaces)
+    }
+    return out
+  }
+
+  /// `text` with `values` replacing their keys' lines (appended when missing, removed when nil); other lines are untouched.
+  static func ini(_ text: String, setting values: [String: String?]) -> String {
+    var pending = values
+    var lines = text.split(separator: "\n", omittingEmptySubsequences: false).compactMap { line -> String? in
+      guard let eq = line.firstIndex(of: "="),
+        let v = pending.removeValue(forKey: line[..<eq].trimmingCharacters(in: .whitespaces))
+      else { return String(line) }
+      return v.map { "\(line[..<eq])=\($0)" }
+    }
+    if lines.last == "" { lines.removeLast() }
+    lines += pending.keys.sorted().compactMap { k in pending[k]!.map { "\(k)=\($0)" } }
+    return lines.joined(separator: "\n") + "\n"
   }
 
   static func register() {
@@ -27,7 +58,7 @@ enum Prefs {
   /// Emulator command line for the current settings.
   static func emulatorArgs(avd: String, grpcPort: Int) -> [String] {
     let d = UserDefaults.standard
-    var args = ["-avd", avd, "-no-window", "-gpu", "host", "-grpc", "\(grpcPort)", "-grpc-use-token", "-no-boot-anim"]
+    var args = ["-avd", avd, "-no-window", "-gpu", "host", "-grpc", "\(grpcPort)", "-grpc-use-token"]
     var features: [String] = []
     // ANGLE: guest GLES on ANGLE over gfxstream Vulkan (MoltenVK). Translator: host GLES→desktop GL.
     if d.string(forKey: gles) == "angle" { features.append("GuestUsesAngle") }
@@ -43,19 +74,28 @@ enum Prefs {
   }
 }
 
+/// Guest screen size (config.ini hw.lcd.*).
+struct DisplaySize: Hashable {
+  var width = 1080, height = 2400, density = 420
+  static let presets: [(String, DisplaySize)] = [
+    ("Phone", DisplaySize(width: 1080, height: 2400, density: 420)),
+    ("Tablet", DisplaySize(width: 2560, height: 1600, density: 320)),
+    ("Desktop", DisplaySize(width: 2560, height: 1440, density: 240)),
+  ]
+
+  // Guards against typos the emulator would only reject at boot.
+  var valid: Bool { (320...7680).contains(width) && (320...7680).contains(height) && (120...640).contains(density) }
+}
+
 struct SettingsView: View {
   @AppStorage(Prefs.gles) var gles = "angle"
   @AppStorage(Prefs.audio) var audio = false
   @AppStorage(Prefs.radios) var radios = false
   @AppStorage(Prefs.cameras) var cameras = false
   @AppStorage(Prefs.debugLogs) var debugLogs = false
-  @AppStorage(Prefs.avd) var avd = ""
 
   var body: some View {
     Form {
-      Picker("Device (AVD)", selection: $avd) {
-        ForEach(Prefs.avds(), id: \.self) { Text($0).tag($0) }
-      }
       Picker("OpenGL ES", selection: $gles) {
         Text("ANGLE in guest (Vulkan → MoltenVK)").tag("angle")
         Text("Host translator (desktop GL)").tag("translator")
@@ -64,7 +104,7 @@ struct SettingsView: View {
       Toggle("Radios (Bluetooth, UWB, cellular modem)", isOn: $radios)
       Toggle("Cameras", isOn: $cameras)
       Toggle("Kernel console and logcat in emulator log", isOn: $debugLogs)
-      Text("Changes apply the next time the emulator starts. The quick-boot snapshot is discarded when hardware changes.")
+      Text("Changes apply the next time the emulator starts. Devices and their screens are in Devices (⇧⌘D).")
         .font(.caption).foregroundStyle(.secondary)
     }
     .formStyle(.grouped)

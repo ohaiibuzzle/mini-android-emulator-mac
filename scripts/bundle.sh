@@ -8,6 +8,10 @@ app=$root/build/Mini.app
 mvk=$root/build/moltenvk
 dylib=$mvk/Package/Release/MoltenVK/dynamic/dylib/macOS/libMoltenVK.dylib
 
+# Command Line Tools' Swift 6.2 can't load its own SWBBuildService (dyld error), and the Metal shaders need Xcode anyway.
+case ${DEVELOPER_DIR:-$(xcode-select -p 2>/dev/null)} in
+  *CommandLineTools*) echo "bundle: needs Xcode's toolchain: sudo xcode-select -s /Applications/Xcode.app (or unset DEVELOPER_DIR)" >&2; exit 1 ;;
+esac
 "$root/scripts/build-moltenvk.sh"
 swift build -c release --package-path "$root/frontend"
 
@@ -16,6 +20,7 @@ mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
 cp "$root/frontend/.build/release/Mini" "$app/Contents/MacOS/Mini"
 cp "$dylib" "$app/Contents/Resources/libMoltenVK.dylib"
 cp "$mvk/LICENSE" "$app/Contents/Resources/MoltenVK-LICENSE.txt"
+cp "$root/scripts/gsi-image.py" "$app/Contents/Resources/gsi-image.py"  # Devices → Import GSI runs it
 cat > "$app/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">

@@ -7,12 +7,9 @@ typealias InputEvent = Android_Emulation_Control_InputEvent
 typealias KeyEvent = Android_Emulation_Control_KeyboardEvent
 typealias PhysicalModel = Android_Emulation_Control_PhysicalModelValue
 
-/// Command-line AVD name, else the one picked in Settings, else the first AVD found.
-let avd = CommandLine.arguments.dropFirst().first { !$0.hasPrefix("-") }
-  ?? UserDefaults.standard.string(forKey: Prefs.avd).flatMap { $0.isEmpty ? nil : $0 }
-  ?? Prefs.avds().first ?? "goldfish37"
+/// `--start <avd>` boots that device (Devices → Start relaunches Mini with it); without it Mini opens Devices.
+let avd = CommandLine.arguments.firstIndex(of: "--start").flatMap { CommandLine.arguments.dropFirst($0 + 1).first } ?? ""
 let grpcPort = 8554
-let sdk = ProcessInfo.processInfo.environment["ANDROID_HOME"] ?? NSHomeDirectory() + "/Library/Android/sdk"
 
 /// File the emulator writes RGBA frames into (ImageTransport.MMAP); we map the same file.
 final class FrameBuffer: @unchecked Sendable {
@@ -213,15 +210,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
   let logURL = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Logs/Mini/\(avd).log")
 
   func applicationDidFinishLaunching(_ note: Notification) {
-    if EmulatorSetup.installed { start() } else { SetupWindow.show { [weak self] in self?.start() } }
+    let begin: () -> Void = { [weak self] in if Prefs.avds().contains(avd) { self?.start() } else { DevicesWindow.show() } }
+    if EmulatorSetup.installed { begin() } else { SetupWindow.show(done: begin) }
   }
 
   private func start() {
+    Devices.running = avd
     emulator.executableURL = URL(fileURLWithPath: EmulatorSetup.dir + "/emulator")
     // Mini's emulator lives outside the SDK; it still needs the SDK for system images.
     // Canary defaults to KosmicKrisp; force MoltenVK (Mini's private-API build has provoking_vertex and faster readback).
     emulator.environment = ProcessInfo.processInfo.environment.merging(
-      ["ANDROID_SDK_ROOT": sdk, "ANDROID_EMU_VK_SELECT_ICD": "moltenvk"]) { _, new in new }
+      ["ANDROID_SDK_ROOT": Prefs.sdk,
+       "ANDROID_EMU_VK_SELECT_ICD": ProcessInfo.processInfo.environment["ANDROID_EMU_VK_SELECT_ICD"] ?? "moltenvk"]) { _, new in new }
     emulator.arguments = Prefs.emulatorArgs(avd: avd, grpcPort: grpcPort)
     try? FileManager.default.createDirectory(at: logURL.deletingLastPathComponent(), withIntermediateDirectories: true)
     if FileManager.default.createFile(atPath: logURL.path, contents: nil), let log = try? FileHandle(forWritingTo: logURL) {
@@ -230,6 +230,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
     emulator.terminationHandler = { _ in DispatchQueue.main.async { NSApp.terminate(nil) } }
     do { try emulator.run() } catch { fatal("cannot launch emulator: \(error)") }
+    liftRefreshCap()
 
     let (inputs, inputsCont) = AsyncStream.makeStream(of: InputEvent.self)
     let (rotations, rotationsCont) = AsyncStream.makeStream(of: PhysicalModel.self)
@@ -289,8 +290,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     window.addTitlebarAccessoryViewController(accessory)
   }
 
+  /// Android's default-refresh-rate vote holds rendering at 60 Hz even when hw.lcd.vsync offers more; a user
+  /// minimum outranks it. Needs adb, so a guest whose adbd doesn't answer (some GSIs) stays at 60.
+  private func liftRefreshCap() {
+    guard let hz = DeviceConfig.load(avd: avd)?.refreshHz, hz > 60 else { return }
+    let adb = Process()
+    adb.executableURL = URL(fileURLWithPath: Prefs.sdk + "/platform-tools/adb")
+    // shortcut: assumes Mini's emulator is the only one (console port 5554); pass -port if you run several.
+    adb.arguments = ["-s", "emulator-5554", "wait-for-device", "shell",
+                     "until [ \"$(getprop sys.boot_completed)\" = 1 ]; do sleep 1; done; settings put system min_refresh_rate \(hz)"]
+    adb.standardOutput = FileHandle.nullDevice
+    adb.standardError = FileHandle.nullDevice
+    try? adb.run()
+  }
+
   @objc func softButton(_ sender: NSButton) { buttonActions[sender.tag]() }
   @objc func showSettings(_ sender: Any?) { SettingsWindow.show() }
+  @objc func showDevices(_ sender: Any?) { DevicesWindow.show() }
   @objc func showLog(_ sender: Any?) { NSWorkspace.shared.open(logURL) }
 
   nonisolated static func run(
@@ -391,6 +407,7 @@ let appItem = NSMenuItem()
 appItem.submenu = NSMenu()
 // nil targets go up the responder chain to the app delegate.
 appItem.submenu!.addItem(withTitle: "Settings…", action: #selector(AppDelegate.showSettings(_:)), keyEquivalent: ",")
+appItem.submenu!.addItem(withTitle: "Devices…", action: #selector(AppDelegate.showDevices(_:)), keyEquivalent: "D")
 appItem.submenu!.addItem(withTitle: "Show Emulator Log", action: #selector(AppDelegate.showLog(_:)), keyEquivalent: "l")
 appItem.submenu!.addItem(.separator())
 appItem.submenu!.addItem(withTitle: "Quit Mini", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
