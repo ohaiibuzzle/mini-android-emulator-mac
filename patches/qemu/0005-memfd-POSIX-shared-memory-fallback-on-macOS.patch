@@ -1,0 +1,42 @@
+diff --git a/util/memfd.c b/util/memfd.c
+index 07beab1..2f755a6 100644
+--- a/util/memfd.c
++++ b/util/memfd.c
+@@ -30,6 +30,7 @@
+ #include "qapi/error.h"
+ #include "qemu/error-report.h"
+ #include "qemu/memfd.h"
++#include "qemu/atomic.h"
+ #include "qemu/host-utils.h"
+ 
+ #if defined CONFIG_LINUX && !defined CONFIG_MEMFD
+@@ -117,6 +118,21 @@ void *qemu_memfd_alloc(const char *name, size_t size, unsigned int seals,
+     }
+ 
+     if (mfd == -1) {
++#ifdef CONFIG_DARWIN
++        /*
++         * No memfd on macOS. A temporary file's dirty pages are written
++         * back to disk, which for display surfaces is every frame;
++         * POSIX shared memory stays in RAM. The name only lives until
++         * shm_unlink and must fit PSHMNAMLEN (31).
++         */
++        static uint32_t serial;
++        gchar *fname = g_strdup_printf("/qemu-%d-%u", (int)getpid(),
++                                       qatomic_fetch_inc(&serial));
++
++        mfd = shm_open(fname, O_RDWR | O_CREAT | O_EXCL, 0600);
++        shm_unlink(fname);
++        g_free(fname);
++#else
+         const char *tmpdir = g_get_tmp_dir();
+         gchar *fname;
+ 
+@@ -124,6 +140,7 @@ void *qemu_memfd_alloc(const char *name, size_t size, unsigned int seals,
+         mfd = mkstemp(fname);
+         unlink(fname);
+         g_free(fname);
++#endif
+ 
+         if (mfd == -1 ||
+             ftruncate(mfd, size) == -1) {
