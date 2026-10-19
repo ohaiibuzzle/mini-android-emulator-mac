@@ -9,10 +9,12 @@ A small Android (goldfish/ranchu) emulator front-end for Apple Silicon. The plan
 
 ## Run
 ```sh
-scripts/bundle.sh && open build/Mini.app             # self-contained app, emulator copied inside
-cd frontend && swift build && .build/debug/Mini goldfish37   # dev: uses the SDK's emulator; arg = AVD name
+scripts/bundle.sh && open build/Mini.app             # builds MoltenVK on first use, then the app
+cd frontend && swift build && .build/debug/Mini goldfish37   # dev run; arg = AVD name
 ```
-Requires `protoc` (`brew install protobuf`) at build time. `bundle.sh` pins a copy of the SDK emulator (~1.3 GB) into `build/Mini.app`, which is gitignored. That copy is for local use only, because the SDK license restricts redistributing it. System images and AVDs still come from the SDK (`ANDROID_HOME`, default `~/Library/Android/sdk`).
+Requires `protoc` (`brew install protobuf`) and Xcode at build time. CI (`.github/workflows/build.yml`, macOS 26 arm64) builds and caches the private-API MoltenVK, runs `swift test`, and uploads an unsigned `Mini.zip`. Downloaded builds are ad-hoc signed, so clear quarantine first: `xattr -dr com.apple.quarantine Mini.app`.
+
+**Emulator download.** The SDK license doesn't allow shipping Google's emulator, so Mini doesn't. On first launch Mini shows the license text from Google's SDK repository. Once you accept, it downloads a pinned Android Emulator (Canary 37.3.4, SHA-1 checked) into `~/Library/Application Support/Mini/emulator`. Your SDK's own emulator is untouched. Mini then replaces that copy's `libMoltenVK.dylib` with the one `bundle.sh` bundles: MoltenVK 1.4.2 built with `MVK_USE_METAL_PRIVATE_API=1`, Apache-2.0. That build adds `VK_EXT_provoking_vertex`, which guest ANGLE needs for GLES 3.x. A `swift run` dev build has no bundle, so it keeps Google's MoltenVK, and the guest only gets ES 2.0. System images and AVDs still come from the SDK (`ANDROID_HOME`, default `~/Library/Android/sdk`).
 
 **Pick the AVD** in Settings (⌘,) or pass it as the first argument. `goldfish37` is a phone (1080×2400). `freeform37` uses the "13.5in Freeform" profile: 2560×1440 landscape with freeform app windows enabled, though apps still open fullscreen until you move one into a window.
 

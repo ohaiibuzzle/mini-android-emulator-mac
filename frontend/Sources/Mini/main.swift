@@ -13,10 +13,6 @@ let avd = CommandLine.arguments.dropFirst().first { !$0.hasPrefix("-") }
   ?? Prefs.avds().first ?? "goldfish37"
 let grpcPort = 8554
 let sdk = ProcessInfo.processInfo.environment["ANDROID_HOME"] ?? NSHomeDirectory() + "/Library/Android/sdk"
-/// Emulator bundled into Mini.app by scripts/bundle.sh, else the SDK's own install.
-let emulatorDir = Bundle.main.resourceURL.map { $0.path + "/emulator" }.flatMap {
-  FileManager.default.isExecutableFile(atPath: $0 + "/emulator") ? $0 : nil
-} ?? sdk + "/emulator"
 
 /// File the emulator writes RGBA frames into (ImageTransport.MMAP); we map the same file.
 final class FrameBuffer: @unchecked Sendable {
@@ -185,9 +181,9 @@ final class ScreenView: NSView {
 
   private func raw(_ e: NSEvent, _ type: KeyEvent.KeyEventType) {
     var k = KeyEvent()
-    k.codeType = .mac
     k.eventType = type
-    k.keyCode = Int32(e.keyCode)
+    // kVK_ANSI_A is 0, which proto3 can't tell from "unset", so the emulator drops it; send evdev KEY_A instead.
+    (k.codeType, k.keyCode) = e.keyCode == 0 ? (.evdev, 30) : (.mac, Int32(e.keyCode))
     key(k)
   }
 
@@ -217,9 +213,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
   let logURL = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Logs/Mini/\(avd).log")
 
   func applicationDidFinishLaunching(_ note: Notification) {
-    emulator.executableURL = URL(fileURLWithPath: emulatorDir + "/emulator")
-    // The bundled emulator lives outside the SDK; it still needs the SDK for system images.
-    emulator.environment = ProcessInfo.processInfo.environment.merging(["ANDROID_SDK_ROOT": sdk]) { _, new in new }
+    if EmulatorSetup.installed { start() } else { SetupWindow.show { [weak self] in self?.start() } }
+  }
+
+  private func start() {
+    emulator.executableURL = URL(fileURLWithPath: EmulatorSetup.dir + "/emulator")
+    // Mini's emulator lives outside the SDK; it still needs the SDK for system images.
+    // Canary defaults to KosmicKrisp; force MoltenVK (Mini's private-API build has provoking_vertex and faster readback).
+    emulator.environment = ProcessInfo.processInfo.environment.merging(
+      ["ANDROID_SDK_ROOT": sdk, "ANDROID_EMU_VK_SELECT_ICD": "moltenvk"]) { _, new in new }
     emulator.arguments = Prefs.emulatorArgs(avd: avd, grpcPort: grpcPort)
     try? FileManager.default.createDirectory(at: logURL.deletingLastPathComponent(), withIntermediateDirectories: true)
     if FileManager.default.createFile(atPath: logURL.path, contents: nil), let log = try? FileHandle(forWritingTo: logURL) {

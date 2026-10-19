@@ -1,0 +1,51 @@
+# Builds the parts Mini ships (private-API MoltenVK + the Swift app) into an unsigned Mini.app.
+# The Android Emulator and system images are not built or bundled: Mini downloads the emulator on first run.
+name: build
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+env:
+  MVK_VERSION: v1.4.2
+
+jobs:
+  moltenvk:
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v7
+      - id: cache
+        uses: actions/cache@v6
+        with:
+          path: |
+            build/moltenvk/LICENSE
+            build/moltenvk/Package/Release/MoltenVK/dynamic/dylib/macOS
+          key: moltenvk-${{ env.MVK_VERSION }}-private-${{ hashFiles('scripts/build-moltenvk.sh') }}
+      - if: steps.cache.outputs.cache-hit != 'true'
+        run: scripts/build-moltenvk.sh
+      - uses: actions/upload-artifact@v7
+        with:
+          name: moltenvk
+          path: |
+            build/moltenvk/LICENSE
+            build/moltenvk/Package/Release/MoltenVK/dynamic/dylib/macOS/libMoltenVK.dylib
+          if-no-files-found: error
+
+  app:
+    needs: moltenvk
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v7
+      - run: brew install protobuf
+      - run: swift test --package-path frontend
+      - uses: actions/download-artifact@v8
+        with:
+          name: moltenvk
+          path: build/moltenvk
+      - run: scripts/bundle.sh  # finds the downloaded MoltenVK, so it skips rebuilding it
+      - run: ditto -c -k --keepParent build/Mini.app build/Mini.zip  # keeps symlinks and signatures
+      - uses: actions/upload-artifact@v7
+        with:
+          name: Mini
+          path: build/Mini.zip
+          if-no-files-found: error
