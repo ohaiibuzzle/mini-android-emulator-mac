@@ -22,7 +22,7 @@ struct SDKDownload: Sendable {
   /// Downloads next to `dest`, verifies the pinned SHA-1, unzips, lets `prepare` adjust the zip's single
   /// top-level directory, then moves it to `dest` (replacing what's there).
   func install(
-    to dest: URL, progress: @escaping @MainActor (Progress) -> Void, prepare: (URL) throws -> Void = { _ in }
+    to dest: URL, progress: @escaping @MainActor (Double) -> Void, prepare: (URL) throws -> Void = { _ in }
   ) async throws {
     let fm = FileManager.default
     let parent = dest.deletingLastPathComponent()
@@ -30,6 +30,10 @@ struct SDKDownload: Sendable {
     // Staged on dest's volume so the final move is a rename, not a multi-GB copy.
     let zip = parent.appendingPathComponent(".mini-download.zip"), staging = parent.appendingPathComponent(".mini-staging")
     defer { try? fm.removeItem(at: zip); try? fm.removeItem(at: staging) }
+    // Only a fraction crosses to the UI, on the main actor: SwiftUI's ProgressView(Progress) observes it with Combine,
+    // which crashed when CFNetwork updated the task's Progress from its own thread mid-download.
+    var observation: NSKeyValueObservation?
+    defer { observation?.invalidate() }
 
     try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
       let task = URLSession.shared.downloadTask(with: zipURL) { tmp, response, error in
@@ -39,7 +43,10 @@ struct SDKDownload: Sendable {
         try? FileManager.default.removeItem(at: zip)
         cont.resume(with: Result { try FileManager.default.moveItem(at: tmp, to: zip) })
       }
-      Task { @MainActor in progress(task.progress) }
+      observation = task.progress.observe(\.fractionCompleted) { p, _ in
+        let fraction = p.fractionCompleted
+        Task { @MainActor in progress(fraction) }
+      }
       task.resume()
     }
 
@@ -79,7 +86,7 @@ enum PlatformTools {
 
   static var installed: Bool { FileManager.default.isExecutableFile(atPath: dir + "/adb") }
 
-  static func install(progress: @escaping @MainActor (Progress) -> Void) async throws {
+  static func install(progress: @escaping @MainActor (Double) -> Void) async throws {
     try await download.install(to: URL(fileURLWithPath: dir), progress: progress)
   }
 }
@@ -100,7 +107,7 @@ enum BaseImage {
     ["system.img", "vendor.img", "ramdisk.img", "kernel-ranchu"].allSatisfy { FileManager.default.fileExists(atPath: dir + $0) }
   }
 
-  static func install(progress: @escaping @MainActor (Progress) -> Void) async throws {
+  static func install(progress: @escaping @MainActor (Double) -> Void) async throws {
     try await download.install(to: URL(fileURLWithPath: dir), progress: progress)
   }
 }
@@ -112,12 +119,12 @@ struct SetupError: LocalizedError {
 
 struct SetupView: View {
   let download: SDKDownload
-  let install: (@escaping @MainActor (Progress) -> Void) async throws -> Void
+  let install: (@escaping @MainActor (Double) -> Void) async throws -> Void
   let cancelTitle: String
   let cancel: () -> Void
   let done: () -> Void
   @State private var license: String?
-  @State private var progress: Progress?
+  @State private var progress: Double?
   @State private var busy = false
   @State private var status: String?
 
@@ -131,7 +138,7 @@ struct SetupView: View {
       }
       .frame(height: 320)
       .background(.background.secondary)
-      if let progress { ProgressView(progress) }
+      if let progress { ProgressView(value: progress) }
       if let status { Text(status).font(.caption).foregroundStyle(.secondary) }
       HStack {
         Spacer()
@@ -184,7 +191,7 @@ enum SetupWindow {
   }
 
   private static func present(
-    _ download: SDKDownload, install: @escaping (@escaping @MainActor (Progress) -> Void) async throws -> Void,
+    _ download: SDKDownload, install: @escaping (@escaping @MainActor (Double) -> Void) async throws -> Void,
     cancelTitle: String, cancel: @escaping () -> Void, closable: Bool, done: @escaping () -> Void
   ) {
     close()
