@@ -179,8 +179,9 @@ enum MiniMsg {
     return d
   }
 
-  /// W3C key names Mini's buttons send → Linux key codes the virtio keyboard has (Android's Generic.kl).
-  static let named: [String: Int32] = ["GoBack": 158, "GoHome": 172, "Power": 116, "AudioVolumeUp": 115, "AudioVolumeDown": 114]
+  /// W3C key names Mini's buttons send → Linux key codes the virtio keyboard has. The guest reads them through
+  /// goldfish's /vendor/usr/keylayout/qwerty2.kl, where HOME is KEY_HOME (102); it has no KEY_HOMEPAGE (172).
+  static let named: [String: Int32] = ["GoBack": 158, "GoHome": 102, "Power": 116, "AudioVolumeUp": 115, "AudioVolumeDown": 114]
 }
 
 /// Runs adb against the guest: registers it with the adb server, then sets up what the boot can't.

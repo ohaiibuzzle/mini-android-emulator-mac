@@ -329,19 +329,27 @@ struct NewDeviceView: View {
         Text("Use letters, digits, . _ - and a name no other device has.").font(.caption).foregroundStyle(.red)
       }
       if source == .image {
-        Picker("Image", selection: $image) {
-          ForEach(images) { Text($0.label).tag(Optional($0)) }
+        if images.isEmpty {
+          LabeledContent("Image") {
+            Button("Download Google's API 37 image…") { SetupWindow.showBaseImage { refresh() } }
+          }
+        } else {
+          Picker("Image", selection: $image) {
+            ForEach(images) { Text($0.label).tag(Optional($0)) }
+          }
         }
       } else {
         LabeledContent("GSI") {
           Button(gsi?.lastPathComponent ?? "Choose…", action: chooseGSI)
         }
+        Text("Currently only supports Android 17 GSIs.").font(.caption).foregroundStyle(.secondary)
         if GSIImport.missingTools {
           Text("Import needs lz4 and e2fsprogs: brew install lz4 e2fsprogs").font(.caption).foregroundStyle(.red)
             .textSelection(.enabled)
         }
       }
-      if !baseInstalled {
+      // The image tab's empty picker already offers the download.
+      if !baseInstalled && !(source == .image && images.isEmpty) {
         HStack {
           Text(source == .gsi ? "Import GSI needs Google's API 37 base image." : "Google's API 37 image isn't installed.")
             .font(.caption)
