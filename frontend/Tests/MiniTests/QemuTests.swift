@@ -37,3 +37,17 @@ import Testing
 @Test func miniMessagesAreSixteenLittleEndianBytes() {
   #expect(MiniMsg.encode(MiniMsg.touch, 384, 638, 1) == Data([1, 0, 0, 0, 0x80, 1, 0, 0, 0x7e, 2, 0, 0, 1, 0, 0, 0]))
 }
+
+/// A port some process listens on is taken; Machine.start then moves on to the next pair.
+@Test func canListenSeesATakenPort() throws {
+  let fd = socket(AF_INET, SOCK_STREAM, 0)
+  var addr = Qemu.loopback(0)
+  var len = socklen_t(MemoryLayout<sockaddr_in>.size)
+  try #require(withUnsafeMutablePointer(to: &addr) { p in
+    p.withMemoryRebound(to: sockaddr.self, capacity: 1) { bind(fd, $0, len) == 0 && listen(fd, 1) == 0 && getsockname(fd, $0, &len) == 0 }
+  })
+  let port = Int(UInt16(bigEndian: addr.sin_port))
+  #expect(!Qemu.canListen(port))
+  close(fd)
+  #expect(Qemu.canListen(port))
+}

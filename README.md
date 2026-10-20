@@ -22,7 +22,9 @@ Mini doesn't ship anything of Google's, because the Android SDK license forbids 
    - **vsock** (`android-vsock`, patch 0002) carries boot properties, sensors and adbd.
    - **The modem and Bluetooth** run on virtio-serial ports. Mini answers both from Swift (`Modem.swift`, `Bluetooth.swift`).
    - **The battery** is a fixed goldfish battery (patch 0004).
-6. **After boot,** Mini registers the guest with adb as `emulator-5554`. It wraps eth0 in `virt_wifi`, because the stock image only routes through Wi-Fi, and lifts the 60 Hz cap if you asked for more. Quitting runs `svc power shutdown` and waits, so `/data` is unmounted cleanly.
+6. **After boot,** Mini registers the guest with adb as `emulator-5554`, or the next free `emulator-5556`, `-5558`… when other devices or emulators are running (`--port <even port>` pins it). It wraps eth0 in `virt_wifi`, because the stock image only routes through Wi-Fi, and lifts the 60 Hz cap if you asked for more. Stopping a device, closing its window or quitting Mini runs `svc power shutdown` and waits, so `/data` is unmounted cleanly.
+
+Devices runs any number of devices side by side. **Start Headless** (or `Mini --start <device> --headless`) boots one with no window, for scrcpy or another adb client to show; Mini then copies no frames. **Show Window** attaches one later.
 
 ## How graphics work
 ```

@@ -25,7 +25,23 @@ enum Qemu {
     }
     return env
   }
-  static let adbPort = 5555  // adb names it emulator-5554, like the emulator's first instance
+
+  /// 127.0.0.1:`port`, for QEMU's adb socket and the adb server.
+  static func loopback(_ port: Int) -> sockaddr_in {
+    sockaddr_in(sin_len: UInt8(MemoryLayout<sockaddr_in>.size), sin_family: sa_family_t(AF_INET), sin_port: in_port_t(port).bigEndian,
+                sin_addr: in_addr(s_addr: inet_addr("127.0.0.1")), sin_zero: (0, 0, 0, 0, 0, 0, 0, 0))
+  }
+
+  /// Whether QEMU could listen on `port`. SO_REUSEADDR as QEMU sets it, so a just-stopped device's TIME_WAIT doesn't count.
+  static func canListen(_ port: Int) -> Bool {
+    let fd = socket(AF_INET, SOCK_STREAM, 0)
+    guard fd >= 0 else { return false }
+    defer { close(fd) }
+    var on: Int32 = 1
+    setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &on, socklen_t(MemoryLayout<Int32>.size))
+    var addr = loopback(port)
+    return withUnsafePointer(to: &addr) { $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { bind(fd, $0, socklen_t(MemoryLayout<sockaddr_in>.size)) } } == 0
+  }
 
   /// What the emulator's bootconfig says, with graphics moved from goldfish_pipe to virtio-gpu (gfxstream ASG) and
   /// minigbm gralloc (the ranchu mapper needs goldfish_address_space, which upstream QEMU lacks).
@@ -128,7 +144,7 @@ enum Qemu {
   }
 
   /// Writes the initrd and readies the disks; returns QEMU's command line.
-  static func arguments(avd: String, socket: String, shm: String, log: String) throws -> [String] {
+  static func arguments(avd: String, adbPort: Int, socket: String, shm: String, log: String) throws -> [String] {
     let ini = Prefs.ini(try String(contentsOfFile: Prefs.configPath(avd: avd), encoding: .utf8))
     var config = DeviceConfig(ini)
     config.hostGLES = config.hostGLES && hostGLESAvailable
@@ -201,8 +217,13 @@ enum MiniMsg {
   static let named: [String: Int32] = ["GoBack": 158, "GoHome": 102, "Power": 116, "AudioVolumeUp": 115, "AudioVolumeDown": 114]
 }
 
-/// Runs adb against the guest: registers it with the adb server, then sets up what the boot can't.
-enum GuestSetup {
+/// Runs adb against one guest: registers it with the adb server, then sets up what the boot can't.
+struct GuestSetup: Sendable {
+  /// QEMU's adb port. adb names the guest emulator-<adbPort - 1>, after the console port the emulator would have.
+  let adbPort: Int
+  var serial: String { "emulator-\(adbPort - 1)" }
+
+
   static var adb: String { PlatformTools.dir + "/adb" }
 
   @discardableResult
@@ -219,47 +240,48 @@ enum GuestSetup {
   }
 
   /// `host:emulator:<port>` is how the emulator tells a running adb server about itself; it then shows as emulator-<port-1>.
-  static func register() async {
-    await adb(["start-server"])
+  func register() async {
+    await Self.adb(["start-server"])
     let fd = socket(AF_INET, SOCK_STREAM, 0)
     guard fd >= 0 else { return }
     defer { close(fd) }
-    var addr = sockaddr_in(sin_len: UInt8(MemoryLayout<sockaddr_in>.size), sin_family: sa_family_t(AF_INET), sin_port: in_port_t(5037).bigEndian,
-                           sin_addr: in_addr(s_addr: inet_addr("127.0.0.1")), sin_zero: (0, 0, 0, 0, 0, 0, 0, 0))
+    var addr = Qemu.loopback(5037)
     let ok = withUnsafePointer(to: &addr) { $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { connect(fd, $0, socklen_t(MemoryLayout<sockaddr_in>.size)) } }
     guard ok == 0 else { return }
-    let req = "host:emulator:\(Qemu.adbPort)"
+    let req = "host:emulator:\(adbPort)"
     _ = (String(format: "%04x", req.utf8.count) + req).withCString { write(fd, $0, strlen($0)) }
   }
 
-  static let serial = "emulator-\(Qemu.adbPort - 1)"
-
   /// Registers until adb sees the guest: QEMU's adb socket opens a moment after launch, and an adbd restart drops it.
-  static func reach() async {
-    while !(await adb(["-s", serial, "get-state"])) {
+  func reach() async {
+    while !Task.isCancelled, !(await Self.adb(["-s", serial, "get-state"])) {
       await register()
       try? await Task.sleep(for: .seconds(2))
     }
   }
 
-  /// Waits for boot, then gives the guest internet: the image only routes through Wi-Fi, so virt_wifi dresses eth0
+  /// Whether the guest finished booting; false if it went away first.
+  func waitForBoot() async -> Bool {
+    await reach()
+    return await Self.adb(["-s", serial, "shell", "until [ \"$(getprop sys.boot_completed)\" = 1 ]; do sleep 1; done"])
+  }
+
+  /// Gives the booted guest internet: the image only routes through Wi-Fi, so virt_wifi dresses eth0
   /// (QEMU's user network) up as the "VirtWifi" access point. That needs root, and `adb root` restarts adbd, which
   /// drops the transport, so the guest is registered again. Then lifts Android's 60 Hz default refresh cap.
-  static func afterBoot(refreshHz: Int) async {
-    await reach()
-    guard await adb(["-s", serial, "shell", "until [ \"$(getprop sys.boot_completed)\" = 1 ]; do sleep 1; done"]) else { return }
+  func afterBoot(refreshHz: Int) async {
     // Images with an Ethernet service (PixelOS) use eth0 as is; the stock image has only Wi-Fi, so eth0 gets wrapped in virt_wifi.
-    if !(await adb(["-s", serial, "shell", "service check ethernet | grep -q ': found'"])) {
+    if !(await Self.adb(["-s", serial, "shell", "service check ethernet | grep -q ': found'"])) {
       // shortcut: images whose adbd refuses root (user builds) stay offline; upgrade to a host-side Wi-Fi AP.
-      await adb(["-s", serial, "root"])
+      await Self.adb(["-s", serial, "root"])
       try? await Task.sleep(for: .seconds(2))
       await reach()
-      await adb(["-s", serial, "shell", "ip link set eth0 up; ip link show wlan0 >/dev/null 2>&1 || ip link add link eth0 name wlan0 type virt_wifi; "
+      await Self.adb(["-s", serial, "shell", "ip link set eth0 up; ip link show wlan0 >/dev/null 2>&1 || ip link add link eth0 name wlan0 type virt_wifi; "
         + "cmd wifi set-wifi-enabled enabled; sleep 3; cmd wifi connect-network VirtWifi open"])
     }
-    if refreshHz > 60 { await adb(["-s", serial, "shell", "settings put system min_refresh_rate \(refreshHz)"]) }
+    if refreshHz > 60 { await Self.adb(["-s", serial, "shell", "settings put system min_refresh_rate \(refreshHz)"]) }
   }
 
   /// A clean shutdown, so /data is unmounted before QEMU exits.
-  static func powerOff() async -> Bool { await adb(["-s", serial, "shell", "svc power shutdown"]) }
+  func powerOff() async -> Bool { await Self.adb(["-s", serial, "shell", "svc power shutdown"]) }
 }

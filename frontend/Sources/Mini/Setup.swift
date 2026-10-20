@@ -205,7 +205,7 @@ enum SetupWindow {
     let w = NSWindow(contentViewController: NSHostingController(rootView: SetupView(
       download: download, install: install, cancelTitle: cancelTitle, cancel: cancel
     ) {
-      done()  // open the next window first: closing the last window quits Mini
+      done()  // open the next window first, so Mini is never left windowless
       close()
     }))
     w.title = "Download \(download.title)"

@@ -117,9 +117,6 @@ struct DeviceConfig: Equatable {
 
 @MainActor
 enum Devices {
-  /// The device this Mini process is running, if any.
-  static var running: String?
-
   static func validName(_ name: String) -> Bool {
     !name.isEmpty && name.allSatisfy { $0.isASCII && ($0.isLetter || $0.isNumber || "._-".contains($0)) }
   }
@@ -149,18 +146,6 @@ enum Devices {
 
   static func erase(_ name: String) throws {
     for path in dataFiles(name) where FileManager.default.fileExists(atPath: path) { try FileManager.default.removeItem(atPath: path) }
-  }
-
-  /// Quits (the guest shuts down) and reopens Mini on `name`, erasing its data in between if asked.
-  static func relaunch(with name: String, erase: Bool = false) {
-    UserDefaults.standard.set(name, forKey: Prefs.avd)
-    // shortcut: a `swift run` build isn't an app bundle, so it just quits; relaunch it by hand.
-    let sh = Process()
-    sh.executableURL = URL(fileURLWithPath: "/bin/sh")
-    sh.arguments = ["-c", "while kill -0 \"$1\" 2>/dev/null; do sleep 0.2; done; a=$2 n=$3; shift 3; rm -rf \"$@\"; exec /usr/bin/open \"$a\" --args --start \"$n\"",
-                    "sh", "\(getpid())", Bundle.main.bundlePath, name] + (erase ? dataFiles(name) : [])
-    if Bundle.main.bundlePath.hasSuffix(".app") { try? sh.run() }
-    NSApp.terminate(nil)
   }
 }
 
@@ -221,6 +206,8 @@ struct DevicesView: View {
   @State private var soleImage: SystemImage?  // the selected device's image, when no other device uses it
   @State private var showImages = false
   @State private var eraseThenStart: Bool?  // set while asking to erase data for a storage change
+  @State private var startHeadless = false  // which Start button asked
+  private var fleet: Fleet { Fleet.shared }
 
   var body: some View {
     HStack(spacing: 0) {
@@ -229,7 +216,11 @@ struct DevicesView: View {
           HStack {
             Text(name)
             Spacer()
-            if name == Devices.running { Text("Running").font(.caption).foregroundStyle(.secondary) }
+            if let m = fleet.machines[name] {
+              Text(m.state.rawValue + (m.window == nil ? ", headless" : "")).font(.caption).foregroundStyle(.secondary)
+            } else if fleet.failures[name] != nil {
+              Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.yellow).help(fleet.failures[name]!)
+            }
           }
         }
         Divider()
@@ -239,7 +230,7 @@ struct DevicesView: View {
             soleImage = SystemImage.installed().first { $0.sysdir == config.sysdir && $0.users == [selection] }
             confirmDelete = true
           } label: { Image(systemName: "minus") }
-            .help("Move device to Trash").disabled(selection == nil || selection == Devices.running)
+            .help("Move device to Trash").disabled(selection == nil || fleet.machines[selection!] != nil)
           Spacer()
           Button("Images…") { showImages = true }
           Button("Import GSI…") { creating = .gsi }
@@ -256,7 +247,7 @@ struct DevicesView: View {
     .frame(width: 760, height: 520)
     .onAppear {
       let last = UserDefaults.standard.string(forKey: Prefs.avd).flatMap { names.contains($0) ? $0 : nil }
-      selection = selection ?? Devices.running ?? last ?? names.first
+      selection = selection ?? fleet.machines.keys.sorted().first ?? last ?? names.first
       load()
     }
     .onChange(of: selection) { load() }
@@ -315,36 +306,57 @@ struct DevicesView: View {
       }
       Section {
         HStack {
-          Text(error ?? "Changes apply the next time the device boots.")
-            .font(.caption).foregroundStyle(error == nil ? Color.secondary : Color.red)
+          let message = error ?? fleet.failures[name]
+          Text(message ?? "Changes apply the next time the device boots.")
+            .font(.caption).foregroundStyle(message == nil ? Color.secondary : Color.red)
           Spacer()
           Button("Save") { if erasing { eraseThenStart = false } else { commit(name, start: false) } }
             .disabled(!config.valid || config == saved)
-          Button(name == Devices.running ? "Restart" : "Start") { if erasing { eraseThenStart = true } else { commit(name, start: true) } }
-            .keyboardShortcut(.defaultAction).disabled(!config.valid)
+          if let m = fleet.machines[name] {
+            if m.window == nil { Button("Show Window") { m.showWindow() } }
+            Button("Stop") { Task { await m.stop() } }.disabled(m.state == .stopping)
+            Button("Restart") { if erasing { eraseThenStart = true } else { commit(name, start: true) } }
+              .keyboardShortcut(.defaultAction).disabled(!config.valid || m.state == .stopping)
+          } else {
+            Button("Start Headless") {
+              if erasing { eraseThenStart = true; startHeadless = true } else { commit(name, start: true, headless: true) }
+            }.help("Boots with no window; view and control it over adb, e.g. with scrcpy.").disabled(!config.valid)
+            Button("Start") { if erasing { eraseThenStart = true } else { commit(name, start: true) } }
+              .keyboardShortcut(.defaultAction).disabled(!config.valid)
+          }
         }
       }
     }
     .formStyle(.grouped)
-    .confirmationDialog("Erase \(name)'s data?", isPresented: Binding { eraseThenStart != nil } set: { if !$0 { eraseThenStart = nil } }) {
-      Button("Erase and Save", role: .destructive) { commit(name, start: eraseThenStart ?? false) }
+    .confirmationDialog("Erase \(name)'s data?", isPresented: Binding { eraseThenStart != nil } set: { if !$0 { eraseThenStart = nil; startHeadless = false } }) {
+      Button("Erase and Save", role: .destructive) { commit(name, start: eraseThenStart ?? false, headless: startHeadless) }
     } message: {
       Text("The new storage size needs a fresh data partition: apps, files and settings on this device are lost."
-        + (name == Devices.running ? " It restarts now." : ""))
+        + (fleet.machines[name] != nil ? " It restarts now." : ""))
     }
   }
 
   private var erasing: Bool { saved.map { $0.storageMB != config.storageMB } ?? false }
 
-  /// Saves, erases data if storage changed (after quitting, for the running device), and starts if asked.
-  private func commit(_ name: String, start: Bool) {
+  /// Saves, erases data if storage changed, and starts if asked. A running device stops first, and a restart keeps
+  /// whether it had a window.
+  private func commit(_ name: String, start: Bool, headless: Bool = false) {
     let erase = erasing
     do {
       try config.save(avd: name)
       saved = config
       error = nil
-      if start || (erase && name == Devices.running) { Devices.relaunch(with: name, erase: erase) } else if erase { try Devices.erase(name) }
-    } catch { self.error = error.localizedDescription }
+    } catch { return self.error = error.localizedDescription }
+    let running = fleet.machines[name]
+    let headless = running.map { $0.window == nil } ?? headless  // before stopping closes the window
+    guard start || erase else { return }
+    Task {
+      await running?.stop()
+      do {
+        if erase { try Devices.erase(name) }
+        if start || running != nil { try Machine.start(name, headless: headless) }
+      } catch { self.error = error.localizedDescription }
+    }
   }
 
   private func load() {

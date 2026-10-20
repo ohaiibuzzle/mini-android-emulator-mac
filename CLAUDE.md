@@ -3,7 +3,7 @@
 A macOS (Apple Silicon) front-end that boots Google's goldfish/ranchu Android images on its own engine: upstream QEMU 11.1.2 + `patches/qemu`, with gfxstream and rutabaga built from source. The Swift app is in `frontend/`. The README covers what it does for users; this file covers how to work on it.
 
 ## Layout
-- `frontend/Sources/Mini/`: the app (SwiftPM, no dependencies). `main.swift` holds the window, input and frame loop; `Qemu.swift` builds the command line, bootconfig and disks, and holds `GuestSetup`, which drives adb. `Modem.swift`, `Bluetooth.swift` play the host side of the guest's modem and HCI. `Devices.swift`, `Setup.swift` and `Settings.swift` are the windows and the downloads.
+- `frontend/Sources/Mini/`: the app (SwiftPM, no dependencies). `main.swift` holds the screen view, input and app lifecycle; `Machine.swift` is one running device (its QEMU, window and frame loop), and `Fleet` the running set; `Qemu.swift` builds the command line, bootconfig and disks, and holds `GuestSetup`, which drives adb. `Modem.swift`, `Bluetooth.swift` play the host side of the guest's modem and HCI. `Devices.swift`, `Setup.swift` and `Settings.swift` are the windows and the downloads.
 - `frontend/Sources/CShm/`: a C shim, because Swift can't call the variadic `shm_open`.
 - `patches/qemu/000N-*.patch`, `patches/rutabaga_gfx/`: our changes to the third-party trees.
 - `third_party/` (git-ignored): `qemu`, `gfxstream`, `rutabaga_gfx` checkouts, plus `install/` (the built engine).
@@ -20,8 +20,8 @@ ninja -C third_party/qemu/build-mini qemu-system-aarch64   # quick QEMU rebuild
 third_party/qemu/build-mini/pyvenv/bin/meson configure third_party/qemu/build-mini -D...  # meson isn't on PATH
 ```
 - Try a change without touching the user's devices: run `MINI_HOME=<scratch dir> build/Mini.app/Contents/MacOS/Mini --start <device>`. Use `cp -c` to clone a system image into the scratch dir for free.
-- The guest is `emulator-5554`; use `<Mini home>/platform-tools/adb`.
-- To quit Mini, use `osascript -e 'quit app "Mini"'`. That lets Android shut down; killing QEMU risks /data.
+- The first guest is `emulator-5554`, the next `-5556` and so on (the lowest free pair; `--port` pins it); use `<Mini home>/platform-tools/adb`. `--headless` runs one without a window.
+- To quit Mini, use `osascript -e 'quit app "Mini"'` or SIGTERM. That lets every Android shut down (PixelOS takes ~16 s); killing QEMU risks /data.
 
 ## QEMU patches
 - Edit inside `third_party/qemu`, then export: `git -C third_party/qemu diff -- <files> > patches/qemu/000N-<name>.patch`, one patch per concern.
