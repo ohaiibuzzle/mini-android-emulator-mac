@@ -68,6 +68,7 @@ jobs:
         with:
           name: shadertranslator
           path: build/shadertranslator
+      - run: brew install meson ninja rust pkg-config glib pixman libslirp vulkan-loader  # build-qemu.sh's deps
       - run: scripts/bundle.sh  # finds the downloaded MoltenVK, so it skips rebuilding it
       - run: ditto -c -k --keepParent build/Mini.app build/Mini.zip  # keeps symlinks and signatures
       - uses: actions/upload-artifact@v7
