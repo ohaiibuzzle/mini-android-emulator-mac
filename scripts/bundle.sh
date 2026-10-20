@@ -25,12 +25,14 @@ mkdir -p "$q/lib" "$q/licenses"
 cp -R "$root/third_party/install/bin" "$q/bin"
 chmod -R u+w "$q"
 find "$q/bin" -type f ! -name qemu-system-aarch64 ! -name qemu-img ! -path "*/lib64/*" -delete  # Mini makes qcow2 overlays with qemu-img
+kegs=$(mktemp)
 relocate() {
   for dep in $(otool -L "$1" | tail -n +2 | awk '{print $1}' | grep -E '^/(opt|Users)/'); do
     name=${dep##*/}
     install_name_tool -change "$dep" "@executable_path/../lib/$name" "$1" 2>/dev/null
     [ -f "$q/lib/$name" ] && continue
     cp "$dep" "$q/lib/$name"
+    dirname "$(dirname "$(realpath "$dep")")" >> "$kegs"  # /opt/homebrew/Cellar/<formula>/<version> for Homebrew's
     chmod u+w "$q/lib/$name"
     install_name_tool -id "@executable_path/../lib/$name" "$q/lib/$name" 2>/dev/null
     relocate "$q/lib/$name"
@@ -50,8 +52,22 @@ if [ -f "$st/libshadertranslator.dylib" ]; then
 else
   echo "bundle: no build/shadertranslator (the CI artifact), so Mini.app can't run GLES on the host" >&2
 fi
-# shortcut: the Homebrew libraries' own license texts (glib/gettext LGPL, pixman MIT, slirp & pcre2 BSD) aren't copied;
-# add them before handing Mini.app to anyone, along with where to get QEMU's source (GPL).
+# The Homebrew libraries' license texts, and where every bundled part's source is (GPL/LGPL). CI's release job reads the
+# "homebrew" lines to attach those sources to the release.
+{
+  echo "Mini's source, with patches/ and the scripts that build all of this: https://github.com/ohaiibuzzle/mini-android-emulator-mac"
+  echo "Each GitHub release of Mini also attaches the QEMU and Homebrew sources below."
+  for t in qemu gfxstream rutabaga_gfx; do
+    echo "$t $(git -C "$root/third_party/$t" remote get-url origin) $(git -C "$root/third_party/$t" rev-parse HEAD) + patches/$t"
+  done
+  grep /Cellar/ "$kegs" | sort -u | while read -r keg; do
+    formula=${keg%/*}; formula=${formula##*/}
+    echo "homebrew $formula ${keg##*/}"
+    find "$keg" -maxdepth 1 -type f \( -iname 'COPYING*' -o -iname 'COPYRIGHT*' -o -iname 'LICEN[CS]E*' -o -iname '*GPL*.txt' \) \
+      -exec sh -c 'cp "$1" "$2-${1##*/}"' _ {} "$q/licenses/$formula" \;
+  done
+} > "$q/licenses/SOURCES.txt"
+rm "$kegs"
 
 cat > "$app/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>

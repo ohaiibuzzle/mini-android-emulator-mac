@@ -47,7 +47,6 @@ The tricky parts:
 - One device at a time, since the adb port is fixed (5555).
 - No camera, GPS or quick boot.
 - Internet on the stock image needs `adb root`, which Google APIs images allow; Play Store and most GSI user builds don't.
-- Mini.app isn't ready to hand out yet: it lacks the Homebrew libraries' license texts and QEMU's GPL source offer.
 - GSI-derived images contain Google's vendor, so don't redistribute them.
 
 ## License

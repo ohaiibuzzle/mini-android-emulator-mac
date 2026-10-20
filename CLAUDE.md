@@ -43,7 +43,7 @@ third_party/qemu/build-mini/pyvenv/bin/meson configure third_party/qemu/build-mi
 - **Never bundle or publish Google's binaries.** That covers the emulator, adb/platform-tools and system images, all under the Android SDK license. Mini downloads them after showing the license (`SDKDownload`).
 - **Never redistribute GSI-derived images.** They contain Google's vendor.
 - **`oracle/`** (captured device data, git-ignored) is never shipped or published.
-- **QEMU is GPL.** A Mini.app handed to anyone needs the source offer and the Homebrew libraries' licenses, which `bundle.sh` doesn't copy yet.
+- **QEMU is GPL.** A Mini.app handed to anyone needs the sources next to it: `bundle.sh` writes `licenses/SOURCES.txt` and the Homebrew license texts, and the CI release attaches the QEMU and Homebrew source tarballs. Hand out only those releases.
 
 ## Working rules
 - Commit or push only when asked. No `Claude-Session` or other attribution lines in commits or PRs.

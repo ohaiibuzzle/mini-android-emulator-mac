@@ -57,6 +57,8 @@ jobs:
   app:
     needs: [moltenvk, shadertranslator]
     runs-on: macos-26
+    permissions:
+      contents: write  # the Release step
     steps:
       - uses: actions/checkout@v7
       - run: swift test --package-path frontend
@@ -70,9 +72,31 @@ jobs:
           path: build/shadertranslator
       - run: brew install meson ninja rust pkg-config glib pixman libslirp vulkan-loader  # build-qemu.sh's deps
       - run: scripts/bundle.sh  # finds the downloaded MoltenVK, so it skips rebuilding it
-      - run: ditto -c -k --keepParent build/Mini.app build/Mini.zip  # keeps symlinks and signatures
+      - name: Make the DMG (drag Mini to Applications)
+        run: |
+          mkdir build/dmg
+          ditto build/Mini.app build/dmg/Mini.app  # keeps symlinks and signatures
+          ln -s /Applications build/dmg/Applications
+          hdiutil create -volname Mini -srcfolder build/dmg -format UDZO build/Mini.dmg
       - uses: actions/upload-artifact@v7
         with:
           name: Mini
-          path: build/Mini.zip
+          path: build/Mini.dmg
           if-no-files-found: error
+      # A v* tag publishes a release: the DMG plus the GPL/LGPL sources it bundles (QEMU, and the Homebrew libraries
+      # bundle.sh lists in SOURCES.txt). Mini's own source and patches/ are the tag's source archive.
+      - name: Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir build/sources
+          v=$(git -C third_party/qemu describe --tags)
+          curl -fsSLo "build/sources/qemu-${v#v}.tar.xz" "https://download.qemu.org/qemu-${v#v}.tar.xz"
+          for f in $(awk '$1 == "homebrew" { print $2 }' build/Mini.app/Contents/Resources/qemu/licenses/SOURCES.txt); do
+            brew fetch -q -s "$f"
+            cp "$(brew --cache -s "$f")" build/sources/
+          done
+          mv build/Mini.dmg "build/Mini-$GITHUB_REF_NAME.dmg"
+          gh release create "$GITHUB_REF_NAME" "build/Mini-$GITHUB_REF_NAME.dmg" build/sources/* --title "Mini $GITHUB_REF_NAME" \
+            --notes "Open the DMG and drag Mini to Applications. Mini isn't notarized: on first launch, allow it in System Settings → Privacy & Security → Open Anyway. The other files are the GPL/LGPL sources of what Mini.app bundles."
