@@ -50,4 +50,7 @@ The tricky parts:
 - Mini.app isn't ready to hand out yet: it lacks the Homebrew libraries' license texts and QEMU's GPL source offer.
 - GSI-derived images contain Google's vendor, so don't redistribute them.
 
+## License
+Mini is under the [GPLv3](LICENSE). The patches in `patches/` keep their upstream trees' licenses: `patches/qemu` is GPL-2.0-or-later like QEMU, and `patches/rutabaga_gfx` is BSD like rutabaga_gfx.
+
 The icon's robot is based on the Android robot, which Google created and shares under [CC BY 3.0](https://creativecommons.org/licenses/by/3.0/).
