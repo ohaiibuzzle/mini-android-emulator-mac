@@ -32,7 +32,8 @@ meson configure build -Dcpp_args="$gles_args"  # also for build dirs made before
 meson install -C build --quiet
 
 cd "$tp/rutabaga_gfx"
-[ -d build ] || meson setup build --buildtype=release --prefix="$install" -Dffi=true -Dfeatures=gfxstream
+# Not [ -d build ]: rutabaga_gfx tracks build/*.toml in git, so a fresh clone already has the directory.
+[ -f build/build.ninja ] || meson setup build --buildtype=release --prefix="$install" -Dffi=true -Dfeatures=gfxstream
 meson install -C build --quiet
 
 # Only what Mini uses, so the binary links just glib, pixman, slirp, rutabaga and CoreAudio.
