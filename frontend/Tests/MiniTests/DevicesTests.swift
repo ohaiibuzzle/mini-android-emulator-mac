@@ -16,5 +16,7 @@ import Testing
   #expect(ini["image.sysdir.1"] == image.sysdir && ini["hw.cpu.ncore"] == "4")
   #expect(DeviceConfig.load(avd: "t1") == { var e = c; e.sysdir = image.sysdir; return e }())
   #expect(throws: SetupError.self) { try Devices.create(name: "t1", image: image, config: c) }
+  try Devices.create(name: "t2", image: SystemImage(sysdir: BaseImage.sysdir, props: [:]), config: c)
+  #expect(image.users == ["t1"] && SystemImage(sysdir: BaseImage.sysdir, props: [:]).users == ["t2"])
   #expect(!Devices.validName("a b") && !Devices.validName("") && Devices.validName("Lineage-24.0_x"))
 }

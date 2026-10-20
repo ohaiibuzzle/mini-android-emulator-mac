@@ -11,6 +11,30 @@ struct SystemImage: Hashable, Identifiable {
   var tagDisplay: String { props["SystemImage.TagDisplay"]?.split(separator: ",").first.map(String.init) ?? tagID }
   var abi: String { props["SystemImage.Abi"] ?? "arm64-v8a" }
   var label: String { "\(tagDisplay) · \(target)" }
+  var path: String { Prefs.home + "/" + sysdir }
+
+  /// Devices that boot from this image; it can't go while any do.
+  var users: [String] { Prefs.avds().filter { DeviceConfig.load(avd: $0)?.sysdir == sysdir } }
+
+  /// Allocated bytes, as du counts them: a GSI's APFS clones of the base's files count in full.
+  var size: String {
+    let files = FileManager.default.enumerator(at: URL(fileURLWithPath: path), includingPropertiesForKeys: [.totalFileAllocatedSizeKey])
+    let bytes = (files?.allObjects ?? []).compactMap { try? ($0 as? URL)?.resourceValues(forKeys: [.totalFileAllocatedSizeKey]).totalFileAllocatedSize }
+    return ByteCountFormatter.string(fromByteCount: Int64(bytes.reduce(0, +)), countStyle: .file)
+  }
+
+  var trashWarning: String {
+    sysdir == BaseImage.sysdir
+      ? "New devices and GSI imports need Google's base image, so Mini will offer to download it again (about 2.2 GB)."
+      : "Its space comes back once the Trash is emptied."
+  }
+
+  /// Moves the image to the Trash: its tag dir when this ABI is all it holds, so the Trash shows a recognizable name.
+  func trash() throws {
+    let fm = FileManager.default, dir = URL(fileURLWithPath: path), tag = dir.deletingLastPathComponent()
+    let siblings = ((try? fm.contentsOfDirectory(atPath: tag.path)) ?? []).filter { !$0.hasPrefix(".") }
+    try fm.trashItem(at: siblings == [dir.lastPathComponent] ? tag : dir, resultingItemURL: nil)
+  }
 
   /// Every `system-images/<api>/<tag>/<abi>/` that has a system.img.
   static func installed() -> [SystemImage] {
@@ -194,6 +218,8 @@ struct DevicesView: View {
   @State private var error: String?
   @State private var creating: NewDeviceView.Source?
   @State private var confirmDelete = false
+  @State private var soleImage: SystemImage?  // the selected device's image, when no other device uses it
+  @State private var showImages = false
   @State private var eraseThenStart: Bool?  // set while asking to erase data for a storage change
 
   var body: some View {
@@ -209,9 +235,13 @@ struct DevicesView: View {
         Divider()
         HStack {
           Button { creating = .image } label: { Image(systemName: "plus") }.help("New device")
-          Button { confirmDelete = true } label: { Image(systemName: "minus") }
+          Button {
+            soleImage = SystemImage.installed().first { $0.sysdir == config.sysdir && $0.users == [selection] }
+            confirmDelete = true
+          } label: { Image(systemName: "minus") }
             .help("Move device to Trash").disabled(selection == nil || selection == Devices.running)
           Spacer()
+          Button("Images…") { showImages = true }
           Button("Import GSI…") { creating = .gsi }
         }
         .buttonStyle(.borderless).padding(8)
@@ -236,12 +266,23 @@ struct DevicesView: View {
         if let created { names = Prefs.avds(); selection = created }
       }
     }
+    .sheet(isPresented: $showImages) { ImagesView { showImages = false } }
     .confirmationDialog("Move \(selection ?? "") to the Trash?", isPresented: $confirmDelete) {
-      Button("Move to Trash", role: .destructive) {
-        guard let name = selection else { return }
-        do { try Devices.delete(name); names = Prefs.avds(); selection = names.first } catch { self.error = error.localizedDescription }
-      }
-    } message: { Text("Its system image stays installed.") }
+      Button("Move to Trash", role: .destructive) { deleteSelected(image: nil) }
+      if let soleImage { Button("Move Device and Image to Trash", role: .destructive) { deleteSelected(image: soleImage) } }
+    } message: {
+      Text(soleImage.map { "No other device uses its image, \($0.label) (\($0.size)). \($0.trashWarning)" } ?? "Its system image stays installed.")
+    }
+  }
+
+  private func deleteSelected(image: SystemImage?) {
+    guard let name = selection else { return }
+    do {
+      try image?.trash()  // first: a failure then leaves the device selected, where its error shows
+      try Devices.delete(name)
+      names = Prefs.avds()
+      selection = names.first
+    } catch { self.error = error.localizedDescription }
   }
 
   private func detail(_ name: String) -> some View {
@@ -438,6 +479,51 @@ struct NewDeviceView: View {
       }
     }
   }
+}
+
+/// Installed images with their size and devices. One no device uses can go to the Trash.
+struct ImagesView: View {
+  let done: () -> Void
+  @State private var rows: [(image: SystemImage, size: String, users: [String])] = []
+  @State private var removing: SystemImage?
+  @State private var error: String?
+
+  var body: some View {
+    VStack(alignment: .leading, spacing: 12) {
+      Text("System images").font(.headline)
+      List(rows, id: \.image) { row in
+        HStack {
+          VStack(alignment: .leading) {
+            Text(row.image.label)
+            Text(row.users.isEmpty ? "Not used by any device" : "Used by " + row.users.joined(separator: ", "))
+              .font(.caption).foregroundStyle(.secondary)
+          }
+          Spacer()
+          Text(row.size).foregroundStyle(.secondary)
+          Button { removing = row.image } label: { Image(systemName: "trash") }
+            .buttonStyle(.borderless).disabled(!row.users.isEmpty)
+            .help(row.users.isEmpty ? "Move image to Trash" : "Delete \(row.users.joined(separator: ", ")) first")
+        }
+      }
+      .frame(height: 260)
+      if let error { Text(error).font(.caption).foregroundStyle(.red).textSelection(.enabled) }
+      HStack {
+        Spacer()
+        Button("Done", action: done).keyboardShortcut(.defaultAction)
+      }
+    }
+    .padding(20)
+    .frame(width: 480)
+    .onAppear(perform: refresh)
+    .confirmationDialog("Move \(removing?.label ?? "") to the Trash?", isPresented: Binding { removing != nil } set: { if !$0 { removing = nil } }) {
+      Button("Move to Trash", role: .destructive) {
+        do { try removing?.trash(); error = nil } catch { self.error = error.localizedDescription }
+        refresh()
+      }
+    } message: { Text(removing?.trashWarning ?? "") }
+  }
+
+  private func refresh() { rows = SystemImage.installed().map { ($0, $0.size, $0.users) } }
 }
 
 @MainActor
