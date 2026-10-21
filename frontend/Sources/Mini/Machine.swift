@@ -249,8 +249,11 @@ final class Machine: NSObject, NSWindowDelegate {
     waiters = []
   }
 
-  /// ⌘-Tab, another window or closing gives the Mac its pointer back.
-  func windowDidResignKey(_ note: Notification) { view?.capture(false) }
+  /// ⌘-Tab, another window or closing gives the Mac its pointer back, and lets go of the pad.
+  func windowDidResignKey(_ note: Notification) {
+    view?.capture(false)
+    view?.pad(Gamepad.rest)
+  }
 
   /// Closing the window stops the device, with the window still there to show it shutting down.
   func windowShouldClose(_ sender: NSWindow) -> Bool {

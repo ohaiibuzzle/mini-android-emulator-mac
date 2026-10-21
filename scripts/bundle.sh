@@ -80,6 +80,10 @@ cat > "$app/Contents/Info.plist" <<PLIST
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>CFBundleShortVersionString</key><string>0.1</string>
   <key>LSMinimumSystemVersion</key><string>15.0</string>
+  <!-- Game Mode, in full screen: Mini's own process gets the priority, QEMU's may not; controllers poll faster either way. -->
+  <key>LSApplicationCategoryType</key><string>public.app-category.games</string>
+  <key>LSSupportsGameMode</key><true/>
+  <key>GCSupportsGameMode</key><true/>
   <key>NSHighResolutionCapable</key><true/>
   <key>NSMicrophoneUsageDescription</key><string>Android apps on your devices can use the microphone.</string>
 </dict></plist>

@@ -1,0 +1,168 @@
+diff --git a/hw/input/meson.build b/hw/input/meson.build
+index 90a2149..1641190 100644
+--- a/hw/input/meson.build
++++ b/hw/input/meson.build
+@@ -7,6 +7,7 @@ system_ss.add(when: 'CONFIG_STELLARIS_GAMEPAD', if_true: files('stellaris_gamepa
+ 
+ system_ss.add(when: 'CONFIG_VIRTIO_INPUT', if_true: files('virtio-input.c'))
+ system_ss.add(when: 'CONFIG_VIRTIO_INPUT', if_true: files('virtio-input-hid.c'))
++system_ss.add(when: 'CONFIG_VIRTIO_INPUT', if_true: files('virtio-input-gamepad.c'))
+ system_ss.add(when: 'CONFIG_VIRTIO_INPUT_HOST', if_true: files('virtio-input-host.c'))
+ 
+ system_ss.add(when: 'CONFIG_LASIPS2', if_true: files('lasips2.c'))
+diff --git a/hw/input/virtio-input-gamepad.c b/hw/input/virtio-input-gamepad.c
+new file mode 100644
+index 0000000..433a0b7
+--- /dev/null
++++ b/hw/input/virtio-input-gamepad.c
+@@ -0,0 +1,89 @@
++/*
++ * virtio-gamepad: an Xbox 360 pad with no host device behind it. Whoever
++ * drives it (Mini's mini-display) calls virtio_input_send() with evdev
++ * events directly; QEMU's input layer has no gamepad events.
++ *
++ * It reports the Xbox 360 pad's USB IDs and the xpad driver's codes, so
++ * Android picks Vendor_045e_Product_028e.kl, which puts the right stick on
++ * AXIS_Z/RZ and the triggers on AXIS_LTRIGGER/RTRIGGER as games expect.
++ *
++ * SPDX-License-Identifier: GPL-2.0-or-later
++ */
++
++#include "qemu/osdep.h"
++#include "qemu/module.h"
++#include "hw/virtio/virtio-input.h"
++#include "standard-headers/linux/input.h"
++
++#define VIRTIO_ID_NAME_GAMEPAD "Microsoft X-Box 360 pad"
++
++static struct virtio_input_config virtio_gamepad_config[] = {
++    {
++        .select    = VIRTIO_INPUT_CFG_ID_NAME,
++        .size      = sizeof(VIRTIO_ID_NAME_GAMEPAD),
++        .u.string  = VIRTIO_ID_NAME_GAMEPAD,
++    },{
++        .select    = VIRTIO_INPUT_CFG_ID_DEVIDS,
++        .size      = sizeof(struct virtio_input_devids),
++        .u.ids     = {
++            .bustype = const_le16(BUS_VIRTUAL),
++            .vendor  = const_le16(0x045e),
++            .product = const_le16(0x028e),
++            .version = const_le16(0x0001),
++        },
++    },
++    { /* end of list */ },
++};
++
++static const uint16_t gamepad_keys[] = {
++    BTN_SOUTH, BTN_EAST, BTN_NORTH, BTN_WEST, BTN_TL, BTN_TR,
++    BTN_SELECT, BTN_START, BTN_MODE, BTN_THUMBL, BTN_THUMBR,
++};
++
++static const struct { uint8_t code; int32_t min, max; } gamepad_axes[] = {
++    { ABS_X, -32768, 32767 }, { ABS_Y, -32768, 32767 },    /* left stick */
++    { ABS_RX, -32768, 32767 }, { ABS_RY, -32768, 32767 },  /* right stick */
++    { ABS_Z, 0, 255 }, { ABS_RZ, 0, 255 },                 /* triggers */
++    { ABS_HAT0X, -1, 1 }, { ABS_HAT0Y, -1, 1 },            /* d-pad */
++};
++
++static void virtio_gamepad_init(Object *obj)
++{
++    VirtIOInput *vinput = VIRTIO_INPUT(obj);
++    virtio_input_config keys = { .select = VIRTIO_INPUT_CFG_EV_BITS, .subsel = EV_KEY };
++    virtio_input_config abs = { .select = VIRTIO_INPUT_CFG_EV_BITS, .subsel = EV_ABS };
++
++    virtio_input_init_config(vinput, virtio_gamepad_config);
++    for (int i = 0; i < ARRAY_SIZE(gamepad_keys); i++) {
++        keys.u.bitmap[gamepad_keys[i] / 8] |= 1 << gamepad_keys[i] % 8;
++        keys.size = MAX(keys.size, gamepad_keys[i] / 8 + 1);
++    }
++    virtio_input_add_config(vinput, &keys);
++    for (int i = 0; i < ARRAY_SIZE(gamepad_axes); i++) {
++        virtio_input_config info = {
++            .select    = VIRTIO_INPUT_CFG_ABS_INFO,
++            .subsel    = gamepad_axes[i].code,
++            .size      = sizeof(virtio_input_absinfo),
++            .u.abs.min = cpu_to_le32(gamepad_axes[i].min),
++            .u.abs.max = cpu_to_le32(gamepad_axes[i].max),
++        };
++        virtio_input_add_config(vinput, &info);
++        abs.u.bitmap[gamepad_axes[i].code / 8] |= 1 << gamepad_axes[i].code % 8;
++        abs.size = MAX(abs.size, gamepad_axes[i].code / 8 + 1);
++    }
++    virtio_input_add_config(vinput, &abs);
++}
++
++static const TypeInfo virtio_gamepad_info = {
++    .name          = TYPE_VIRTIO_GAMEPAD,
++    .parent        = TYPE_VIRTIO_INPUT,
++    .instance_size = sizeof(VirtIOInput),
++    .instance_init = virtio_gamepad_init,
++};
++
++static void virtio_gamepad_register(void)
++{
++    type_register_static(&virtio_gamepad_info);
++}
++
++type_init(virtio_gamepad_register)
+diff --git a/hw/virtio/virtio-input-pci.c b/hw/virtio/virtio-input-pci.c
+index cd35608..c25cae5 100644
+--- a/hw/virtio/virtio-input-pci.c
++++ b/hw/virtio/virtio-input-pci.c
+@@ -30,6 +30,7 @@ struct VirtIOInputPCI {
+ #define TYPE_VIRTIO_MOUSE_PCI      "virtio-mouse-pci"
+ #define TYPE_VIRTIO_TABLET_PCI     "virtio-tablet-pci"
+ #define TYPE_VIRTIO_MULTITOUCH_PCI "virtio-multitouch-pci"
++#define TYPE_VIRTIO_GAMEPAD_PCI    "virtio-gamepad-pci"
+ OBJECT_DECLARE_SIMPLE_TYPE(VirtIOInputHIDPCI, VIRTIO_INPUT_HID_PCI)
+ 
+ struct VirtIOInputHIDPCI {
+@@ -111,6 +112,14 @@ static void virtio_multitouch_initfn(Object *obj)
+                                 TYPE_VIRTIO_MULTITOUCH);
+ }
+ 
++static void virtio_gamepad_initfn(Object *obj)
++{
++    VirtIOInputPCI *dev = VIRTIO_INPUT_PCI(obj);
++
++    virtio_instance_init_common(obj, &dev->vdev, sizeof(dev->vdev),
++                                TYPE_VIRTIO_GAMEPAD);
++}
++
+ static const TypeInfo virtio_input_pci_info = {
+     .name          = TYPE_VIRTIO_INPUT_PCI,
+     .parent        = TYPE_VIRTIO_PCI,
+@@ -156,6 +165,13 @@ static const VirtioPCIDeviceTypeInfo virtio_multitouch_pci_info = {
+     .instance_init = virtio_multitouch_initfn,
+ };
+ 
++static const VirtioPCIDeviceTypeInfo virtio_gamepad_pci_info = {
++    .generic_name  = TYPE_VIRTIO_GAMEPAD_PCI,
++    .parent        = TYPE_VIRTIO_INPUT_PCI,
++    .instance_size = sizeof(VirtIOInputPCI),
++    .instance_init = virtio_gamepad_initfn,
++};
++
+ static void virtio_pci_input_register(void)
+ {
+     /* Base types: */
+@@ -167,6 +183,7 @@ static void virtio_pci_input_register(void)
+     virtio_pci_types_register(&virtio_mouse_pci_info);
+     virtio_pci_types_register(&virtio_tablet_pci_info);
+     virtio_pci_types_register(&virtio_multitouch_pci_info);
++    virtio_pci_types_register(&virtio_gamepad_pci_info);
+ }
+ 
+ type_init(virtio_pci_input_register)
+diff --git a/include/hw/virtio/virtio-input.h b/include/hw/virtio/virtio-input.h
+index 1e94f8a..6adfade 100644
+--- a/include/hw/virtio/virtio-input.h
++++ b/include/hw/virtio/virtio-input.h
+@@ -31,6 +31,7 @@ OBJECT_DECLARE_TYPE(VirtIOInput, VirtIOInputClass,
+ #define TYPE_VIRTIO_MOUSE      "virtio-mouse-device"
+ #define TYPE_VIRTIO_TABLET     "virtio-tablet-device"
+ #define TYPE_VIRTIO_MULTITOUCH "virtio-multitouch-device"
++#define TYPE_VIRTIO_GAMEPAD    "virtio-gamepad-device"
+ 
+ OBJECT_DECLARE_SIMPLE_TYPE(VirtIOInputHID, VIRTIO_INPUT_HID)
+ #define VIRTIO_INPUT_HID_GET_PARENT_CLASS(obj) \

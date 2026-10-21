@@ -316,6 +316,16 @@ final class ScreenView: NSView {
   override func otherMouseDragged(with e: NSEvent) { mouseMoved(with: e) }
   override func otherMouseUp(with e: NSEvent) { button(e, down: false) }
 
+  private var padState = Gamepad.rest
+
+  /// The pad's whole state; only what changed goes to the guest's virtio-gamepad, in one batch.
+  func pad(_ events: [Gamepad.Event]) {
+    let changed = zip(events, padState).filter { $0.value != $1.value }.map(\.0)
+    padState = events
+    guard !changed.isEmpty else { return }
+    inputs.yield((changed + [Gamepad.syn]).reduce(into: Data()) { $0 += MiniMsg.encode(MiniMsg.pad, $1.code, $1.value, arg: $1.type) })
+  }
+
   /// W3C key name, e.g. "GoBack", "GoHome", "AppSwitch", "Power", "AudioVolumeUp".
   func named(_ name: String) {
     if name == "AppSwitch" {
@@ -356,6 +366,7 @@ final class ScreenView: NSView {
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
   func applicationDidFinishLaunching(_ note: Notification) {
+    Gamepad.start()
     let begin = {
       DevicesWindow.show()
       guard let avd = flag("--start") else { return }

@@ -68,10 +68,10 @@ index d345f6c..3e9e7f4 100644
    'ui-qmp-cmds.c',
 diff --git a/ui/mini.c b/ui/mini.c
 new file mode 100644
-index 0000000..dd55e33
+index 0000000..f103b00
 --- /dev/null
 +++ b/ui/mini.c
-@@ -0,0 +1,325 @@
+@@ -0,0 +1,338 @@
 +/*
 + * mini-display: hands the first graphic console to the Mini front-end.
 + *
@@ -84,8 +84,10 @@ index 0000000..dd55e33
 + * console is copied, turned by the current rotation, into the frame Mini
 + * isn't showing and a FrameMsg names it. Mini sends InputMsgs back: touch
 + * in panel pixels (to the virtio multitouch screen), pointer motion (to the
-+ * virtio mouse), Linux or macOS key codes, and the device rotation, which
-+ * also tilts the android-vsock accelerometer so the guest reorients.
++ * virtio mouse), Linux or macOS key codes, evdev events for the
++ * virtio-gamepad (Mini ends each batch with EV_SYN), and the device
++ * rotation, which also tilts the android-vsock accelerometer so the guest
++ * reorients.
 + *
 + * SPDX-License-Identifier: GPL-2.0-or-later
 + */
@@ -110,13 +112,14 @@ index 0000000..dd55e33
 +    uint32_t buffer;    /* 0 or 1: which half of the shm file */
 +} FrameMsg;
 +
-+enum { MSG_TOUCH = 1, MSG_KEY = 2, MSG_MAC_KEY = 3, MSG_ROTATE = 4, MSG_POINTER = 5 };
++enum { MSG_TOUCH = 1, MSG_KEY = 2, MSG_MAC_KEY = 3, MSG_ROTATE = 4, MSG_POINTER = 5, MSG_PAD = 6 };
 +
 +typedef struct InputMsg {
 +    uint8_t type;
-+    int8_t arg;       /* touch: finger (slot); pointer: wheel notches, + is up */
++    int8_t arg;       /* touch: finger (slot); pointer: wheel notches, + is up; pad: evdev type */
 +    uint8_t pad[2];
-+    int32_t a, b, c;  /* touch: x, y, down; pointer: dx, dy, buttons; key: code, down; rotate: degrees */
++    int32_t a, b, c;  /* touch: x, y, down; pointer: dx, dy, buttons; key: code, down; rotate: degrees;
++                         pad: evdev code, value */
 +} InputMsg;
 +
 +struct MiniDisplay {
@@ -279,6 +282,16 @@ index 0000000..dd55e33
 +    case MSG_KEY:
 +        qemu_input_event_send_key_linux(con, msg->a, msg->b);
 +        break;
++    case MSG_PAD: {
++        Object *pad = object_resolve_type_unambiguous("virtio-gamepad-device", NULL);
++        if (pad) {
++            virtio_input_event e = {
++                cpu_to_le16((uint8_t)msg->arg), cpu_to_le16(msg->a), cpu_to_le32(msg->b)
++            };
++            virtio_input_send(VIRTIO_INPUT(pad), &e);
++        }
++        break;
++    }
 +    case MSG_ROTATE: {
 +        s->rotation = ((msg->a / 90) % 4 + 4) % 4;
 +        Object *vsock = object_resolve_type_unambiguous("android-vsock-device", NULL);
