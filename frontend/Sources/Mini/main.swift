@@ -384,12 +384,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
   /// A device window's Machine answers first with its own log; from anywhere else, the folder of them.
   @objc func showLog(_ sender: Any?) { NSWorkspace.shared.open(Machine.log("").deletingLastPathComponent()) }
 
-  /// Every device shuts down cleanly, at once; QEMU itself would just pull the plug on /data.
+  /// Every device shuts down cleanly, at once; QEMU itself would just pull the plug on /data. Then Mini's adb server goes.
   func applicationShouldTerminate(_ app: NSApplication) -> NSApplication.TerminateReply {
     let machines = Array(Fleet.shared.machines.values)
-    guard !machines.isEmpty else { return .terminateNow }
+    guard !machines.isEmpty || GuestSetup.startedServer else { return .terminateNow }
     Task {
       await withTaskGroup(of: Void.self) { group in for m in machines { group.addTask { await m.stop() } } }
+      if GuestSetup.startedServer { await GuestSetup.adb(["kill-server"]) }
       app.reply(toApplicationShouldTerminate: true)
     }
     return .terminateLater

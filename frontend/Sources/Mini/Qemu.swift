@@ -241,9 +241,19 @@ struct GuestSetup: Sendable {
     }
   }
 
+  /// Whether Mini started the adb server, which it then stops on quit: macOS 27 shows Mini as "Running in Background"
+  /// for as long as a process it launched lives on. A server someone else started is theirs.
+  @MainActor static var startedServer = false
+
+  /// Starts the adb server unless one runs, noting which. Any other adb command would start it without telling.
+  static func startServer() async {
+    if Qemu.canListen(5037) { await MainActor.run { startedServer = true } }
+    await adb(["start-server"])
+  }
+
   /// `host:emulator:<port>` is how the emulator tells a running adb server about itself; it then shows as emulator-<port-1>.
   func register() async {
-    await Self.adb(["start-server"])
+    await Self.startServer()
     let fd = socket(AF_INET, SOCK_STREAM, 0)
     guard fd >= 0 else { return }
     defer { close(fd) }
@@ -256,6 +266,7 @@ struct GuestSetup: Sendable {
 
   /// Registers until adb sees the guest: QEMU's adb socket opens a moment after launch, and an adbd restart drops it.
   func reach() async {
+    await Self.startServer()
     while !Task.isCancelled, !(await Self.adb(["-s", serial, "get-state"])) {
       await register()
       try? await Task.sleep(for: .seconds(2))
