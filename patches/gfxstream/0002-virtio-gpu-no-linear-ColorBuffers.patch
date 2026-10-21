@@ -1,0 +1,17 @@
+diff --git a/host/virtio_gpu_resource.cpp b/host/virtio_gpu_resource.cpp
+index cffb8923..c1fc61a5 100644
+--- a/host/virtio_gpu_resource.cpp
++++ b/host/virtio_gpu_resource.cpp
+@@ -175,7 +175,11 @@ std::optional<VirtioGpuResource> VirtioGpuResource::Create(
+             return std::nullopt;
+         }
+         auto format = *formatOpt;
+-        const bool linear = (args->bind & VIRGL_BIND_LINEAR) != 0;
++        // Mini: ignore VIRGL_BIND_LINEAR. Guest AHardwareBuffer images are always created OPTIMAL (the host can't know their
++        // ColorBuffer yet), so a LINEAR ColorBuffer aliases them with another layout: CPU-written buffers such as software-
++        // decoded video come out scrambled. The guest never maps ColorBuffer memory here (no blobs; writes are transfers).
++        // shortcut: linear ColorBuffers are gone, restore them once AHB imports take the ColorBuffer's tiling.
++        const bool linear = false;
+ 
+         if (!FrameBuffer::getFB()->createColorBufferWithResourceHandle(args->width, args->height,
+                                                                        format, args->handle, linear)) {
