@@ -183,7 +183,7 @@ enum Qemu {
       // Port 3: the other end of the guest's bt_vhci_forwarder, answered by Bluetooth.run.
       "-chardev", "socket,id=bluetooth,path=\(socket).bluetooth,server=on,wait=off",
       "-device", "virtserialport,chardev=bluetooth,name=bluetooth",
-      "-device", "virtio-keyboard-pci", "-device", "virtio-multitouch-pci",
+      "-device", "virtio-keyboard-pci", "-device", "virtio-multitouch-pci", "-device", "virtio-mouse-pci",
       // One output and one input stream; the ranchu audio HAL drives them through virtio_snd.
       "-audiodev", "coreaudio,id=snd", "-device", "virtio-sound-pci,audiodev=snd",
       // GuestVulkanOnly: guest ANGLE draws everything through Vulkan, so the host needs no GLES. Without it, guest GLES goes
@@ -204,10 +204,11 @@ enum Qemu {
 
 /// mini-display's wire format (third_party/qemu/ui/mini.c).
 enum MiniMsg {
-  static let touch: UInt8 = 1, key: UInt8 = 2, macKey: UInt8 = 3, rotate: UInt8 = 4
+  static let touch: UInt8 = 1, key: UInt8 = 2, macKey: UInt8 = 3, rotate: UInt8 = 4, pointer: UInt8 = 5
 
-  static func encode(_ type: UInt8, _ a: Int32, _ b: Int32 = 0, _ c: Int32 = 0) -> Data {
-    var d = Data([type, 0, 0, 0])
+  /// `arg` is a touch's finger (0...9) or a pointer's wheel notches (+ is up).
+  static func encode(_ type: UInt8, _ a: Int32, _ b: Int32 = 0, _ c: Int32 = 0, arg: Int8 = 0) -> Data {
+    var d = Data([type, UInt8(bitPattern: arg), 0, 0])
     for v in [a, b, c] { withUnsafeBytes(of: v.littleEndian) { d.append(contentsOf: $0) } }
     return d
   }

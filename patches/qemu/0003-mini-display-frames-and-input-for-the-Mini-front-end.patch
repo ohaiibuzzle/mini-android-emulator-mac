@@ -68,10 +68,10 @@ index d345f6c..3e9e7f4 100644
    'ui-qmp-cmds.c',
 diff --git a/ui/mini.c b/ui/mini.c
 new file mode 100644
-index 0000000..604728c
+index 0000000..dd55e33
 --- /dev/null
 +++ b/ui/mini.c
-@@ -0,0 +1,282 @@
+@@ -0,0 +1,325 @@
 +/*
 + * mini-display: hands the first graphic console to the Mini front-end.
 + *
@@ -82,8 +82,9 @@ index 0000000..604728c
 + * <side>x<side>, side being the longer screen edge, and connects to the
 + * chardev. On every update the
 + * console is copied, turned by the current rotation, into the frame Mini
-+ * isn't showing and a FrameMsg names it. Mini sends InputMsgs back: touch in
-+ * panel pixels, Linux or macOS key codes, and the device rotation, which
++ * isn't showing and a FrameMsg names it. Mini sends InputMsgs back: touch
++ * in panel pixels (to the virtio multitouch screen), pointer motion (to the
++ * virtio mouse), Linux or macOS key codes, and the device rotation, which
 + * also tilts the android-vsock accelerometer so the guest reorients.
 + *
 + * SPDX-License-Identifier: GPL-2.0-or-later
@@ -97,6 +98,7 @@ index 0000000..604728c
 +#include "chardev/char-fe.h"
 +#include "ui/console.h"
 +#include "ui/input.h"
++#include "hw/virtio/virtio-input.h"
 +#include <sys/mman.h>
 +
 +#define TYPE_MINI_DISPLAY "mini-display"
@@ -108,12 +110,13 @@ index 0000000..604728c
 +    uint32_t buffer;    /* 0 or 1: which half of the shm file */
 +} FrameMsg;
 +
-+enum { MSG_TOUCH = 1, MSG_KEY = 2, MSG_MAC_KEY = 3, MSG_ROTATE = 4 };
++enum { MSG_TOUCH = 1, MSG_KEY = 2, MSG_MAC_KEY = 3, MSG_ROTATE = 4, MSG_POINTER = 5 };
 +
 +typedef struct InputMsg {
 +    uint8_t type;
-+    uint8_t pad[3];
-+    int32_t a, b, c;  /* touch: x, y, down; key: code, down; rotate: degrees */
++    int8_t arg;       /* touch: finger (slot); pointer: wheel notches, + is up */
++    uint8_t pad[2];
++    int32_t a, b, c;  /* touch: x, y, down; pointer: dx, dy, buttons; key: code, down; rotate: degrees */
 +} InputMsg;
 +
 +struct MiniDisplay {
@@ -127,7 +130,8 @@ index 0000000..604728c
 +    size_t map_size;
 +    uint32_t buffer, rotation;
 +    struct touch_slot slots[INPUT_EVENT_SLOTS_MAX];
-+    bool touching;
++    uint32_t buttons;   /* the mouse's, as MSG_POINTER's bits */
++    const char *routed; /* the input device QEMU's button events go to */
 +    InputMsg in;
 +    size_t in_len;
 +    FrameMsg out;       /* a FrameMsg the socket took only part of */
@@ -211,23 +215,62 @@ index 0000000..604728c
 +    .dpy_gfx_switch = mini_switch,
 +};
 +
++/*
++ * The mouse and the multitouch screen both take button events, and QEMU
++ * hands those to whichever input device was activated last: activate the
++ * one this message is for.
++ */
++static void mini_route(MiniDisplay *s, const char *type)
++{
++    Object *o = s->routed == type ? NULL : object_resolve_type_unambiguous(type, NULL);
++
++    if (o && VIRTIO_INPUT_HID(o)->hs) {
++        qemu_input_handler_activate(VIRTIO_INPUT_HID(o)->hs);
++        s->routed = type;
++    }
++}
++
 +static void mini_input(MiniDisplay *s, const InputMsg *msg)
 +{
 +    QemuConsole *con = s->dcl.con;
 +    DisplaySurface *surf = qemu_console_surface(con);
 +
 +    switch (msg->type) {
-+    case MSG_TOUCH:
-+        if (!surf || (!msg->c && !s->touching)) {
++    case MSG_TOUCH: {
++        if (!surf || msg->arg < 0 || msg->arg >= INPUT_EVENT_SLOTS_MAX) {
 +            break;
 +        }
-+        qemu_input_touch_event(con, s->slots, 0, surface_width(surf), surface_height(surf),
++        bool touching = s->slots[msg->arg].tracking_id != -1;
++        if (!msg->c && !touching) {
++            break;
++        }
++        mini_route(s, TYPE_VIRTIO_MULTITOUCH);
++        qemu_input_touch_event(con, s->slots, msg->arg, surface_width(surf), surface_height(surf),
 +                               msg->a, msg->b,
 +                               !msg->c ? INPUT_MULTI_TOUCH_TYPE_END :
-+                               s->touching ? INPUT_MULTI_TOUCH_TYPE_UPDATE :
++                               touching ? INPUT_MULTI_TOUCH_TYPE_UPDATE :
 +                               INPUT_MULTI_TOUCH_TYPE_BEGIN, NULL);
-+        s->touching = msg->c;
 +        break;
++    }
++    case MSG_POINTER: {
++        static uint32_t bits[INPUT_BUTTON__MAX] = {
++            [INPUT_BUTTON_LEFT] = 1, [INPUT_BUTTON_RIGHT] = 2, [INPUT_BUTTON_MIDDLE] = 4,
++            [INPUT_BUTTON_SIDE] = 8, [INPUT_BUTTON_EXTRA] = 16,
++        };
++        mini_route(s, TYPE_VIRTIO_MOUSE);
++        qemu_input_queue_rel(con, INPUT_AXIS_X, msg->a);
++        qemu_input_queue_rel(con, INPUT_AXIS_Y, msg->b);
++        qemu_input_update_buttons(con, bits, s->buttons, msg->c);
++        s->buttons = msg->c;
++        /* The virtio mouse turns a wheel button press into one REL_WHEEL notch. */
++        for (int i = 0; i < abs(msg->arg); i++) {
++            InputButton wheel = msg->arg > 0 ? INPUT_BUTTON_WHEEL_UP : INPUT_BUTTON_WHEEL_DOWN;
++            qemu_input_queue_btn(con, wheel, true);
++            qemu_input_queue_btn(con, wheel, false);
++        }
++        qemu_input_event_sync();
++        break;
++    }
 +    case MSG_MAC_KEY:
 +        if ((guint)msg->a < qemu_input_map_osx_to_linux_len) {
 +            qemu_input_event_send_key_linux(con, qemu_input_map_osx_to_linux[msg->a], msg->b);

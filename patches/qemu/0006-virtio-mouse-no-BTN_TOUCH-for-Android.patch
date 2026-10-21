@@ -1,0 +1,15 @@
+diff --git a/hw/input/virtio-input-hid.c b/hw/input/virtio-input-hid.c
+index 1019d6b..9205c57 100644
+--- a/hw/input/virtio-input-hid.c
++++ b/hw/input/virtio-input-hid.c
+@@ -359,8 +359,9 @@ static void virtio_mouse_init(Object *obj)
+ 
+     vhid->handler = &virtio_mouse_handler;
+     virtio_input_init_config(vinput, virtio_mouse_config);
++    /* Every button but the last, touch: Android takes a BTN_TOUCH device with no ABS_X/Y for an external stylus. */
+     virtio_input_extend_config(vinput, keymap_button,
+-                               ARRAY_SIZE(keymap_button),
++                               INPUT_BUTTON_TOUCH,
+                                VIRTIO_INPUT_CFG_EV_BITS, EV_KEY);
+ }
+ 

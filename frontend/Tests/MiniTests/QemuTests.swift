@@ -36,6 +36,11 @@ import Testing
 
 @Test func miniMessagesAreSixteenLittleEndianBytes() {
   #expect(MiniMsg.encode(MiniMsg.touch, 384, 638, 1) == Data([1, 0, 0, 0, 0x80, 1, 0, 0, 0x7e, 2, 0, 0, 1, 0, 0, 0]))
+  #expect(MiniMsg.encode(MiniMsg.pointer, 0, 0, 2, arg: -3) == Data([5, 0xfd, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2, 0, 0, 0]))
+}
+
+@Test func wheelLinesBecomeWholeNotches() {
+  #expect(ScreenView.notches(0.1) == 1 && ScreenView.notches(-2.2) == -3 && ScreenView.notches(1000) == 127)
 }
 
 /// A port some process listens on is taken; Machine.start then moves on to the next pair.

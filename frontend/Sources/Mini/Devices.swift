@@ -244,7 +244,7 @@ struct DevicesView: View {
           .foregroundStyle(.secondary).frame(maxWidth: .infinity, maxHeight: .infinity)
       }
     }
-    .frame(width: 760, height: 520)
+    .frame(minWidth: 760, minHeight: 520)
     .onAppear {
       let last = UserDefaults.standard.string(forKey: Prefs.avd).flatMap { names.contains($0) ? $0 : nil }
       selection = selection ?? fleet.machines.keys.sorted().first ?? last ?? names.first
@@ -546,7 +546,7 @@ enum DevicesWindow {
     if window == nil {
       let w = NSWindow(contentViewController: NSHostingController(rootView: DevicesView()))
       w.title = "Devices"
-      w.styleMask = [.titled, .closable]
+      w.styleMask = [.titled, .closable, .miniaturizable, .resizable]
       w.isReleasedWhenClosed = false
       window = w
     }

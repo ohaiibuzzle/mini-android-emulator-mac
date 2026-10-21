@@ -107,10 +107,13 @@ final class Machine: NSObject, NSWindowDelegate {
       styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
     w.isReleasedWhenClosed = false  // Machine holds it
     w.title = name
-    w.titleVisibility = .hidden  // the soft buttons need the room
     w.contentView = view
     w.delegate = self
-    addSoftButtons(to: w)
+    let toolbar = NSToolbar(identifier: "device")
+    toolbar.delegate = self
+    toolbar.displayMode = .iconOnly
+    w.toolbar = toolbar
+    w.toolbarStyle = .unified  // the title left-aligned, the mouse hint under it as the subtitle
     w.center()
     w.makeKeyAndOrderFront(nil)
     w.makeFirstResponder(view)
@@ -166,58 +169,51 @@ final class Machine: NSObject, NSWindowDelegate {
   }
 
   // Shortcuts are the Android Emulator's, so they're what Android developers' fingers already know.
-  static let buttons: [(symbol: String, label: String, key: String, mods: NSEvent.ModifierFlags, action: @MainActor (ScreenView) -> Void)] = {
+  // The Device menu's buttons, which come first, are also in the toolbar.
+  static let buttons: [(menu: String, symbol: String, label: String, key: String, mods: NSEvent.ModifierFlags, action: @MainActor (ScreenView) -> Void)] = {
     let arrow = { (k: Int) in String(Character(UnicodeScalar(k)!)) }
     return [
-      ("chevron.backward", "Back", "\u{8}", .command, { $0.named("GoBack") }),  // ⌘⌫
-      ("circle", "Home", "h", [.command, .shift], { $0.named("GoHome") }),
-      ("square", "Overview", "o", .command, { $0.named("AppSwitch") }),
-      ("rotate.left", "Rotate left", arrow(NSLeftArrowFunctionKey), .command, { $0.rotate(by: 90) }),
-      ("rotate.right", "Rotate right", arrow(NSRightArrowFunctionKey), .command, { $0.rotate(by: -90) }),
-      ("speaker.wave.1", "Volume down", arrow(NSDownArrowFunctionKey), .command, { $0.named("AudioVolumeDown") }),
-      ("speaker.wave.3", "Volume up", arrow(NSUpArrowFunctionKey), .command, { $0.named("AudioVolumeUp") }),
-      ("power", "Power", "p", .command, { $0.named("Power") }),
-      ("camera", "Screenshot to Desktop", "s", .command, { $0.saveScreenshot() }),
+      ("Device", "chevron.backward", "Back", "\u{8}", .command, { $0.named("GoBack") }),  // ⌘⌫
+      ("Device", "circle", "Home", "h", [.command, .shift], { $0.named("GoHome") }),
+      ("Device", "square", "Overview", "o", .command, { $0.named("AppSwitch") }),
+      ("Device", "power", "Power", "p", .command, { $0.named("Power") }),
+      ("View", "rotate.left", "Rotate left", arrow(NSLeftArrowFunctionKey), .command, { $0.rotate(by: 90) }),
+      ("View", "rotate.right", "Rotate right", arrow(NSRightArrowFunctionKey), .command, { $0.rotate(by: -90) }),
+      ("View", "camera", "Screenshot to Desktop", "s", .command, { $0.saveScreenshot() }),
+      ("Audio", "speaker.wave.1", "Volume down", arrow(NSDownArrowFunctionKey), .command, { $0.named("AudioVolumeDown") }),
+      ("Audio", "speaker.wave.3", "Volume up", arrow(NSUpArrowFunctionKey), .command, { $0.named("AudioVolumeUp") }),
     ]
   }()
 
-  /// The Device menu (nil target) reaches the key window's Machine, as its delegate, through the responder chain.
-  static func deviceMenu() -> NSMenuItem {
-    let menu = NSMenu(title: "Device")
-    for (i, b) in buttons.enumerated() {
-      let item = menu.addItem(withTitle: b.label, action: #selector(softButton(_:)), keyEquivalent: b.key)
-      item.keyEquivalentModifierMask = b.mods
-      item.tag = i
+  /// The Device, View and Audio menus (nil target) reach the key window's Machine, as its delegate, through the
+  /// responder chain.
+  static func menus() -> [NSMenuItem] {
+    ["Device", "View", "Audio"].map { title in
+      let menu = NSMenu(title: title)
+      for (i, b) in buttons.enumerated() where b.menu == title {
+        let item = menu.addItem(withTitle: b.label, action: #selector(softButton(_:)), keyEquivalent: b.key)
+        item.keyEquivalentModifierMask = b.mods
+        item.tag = i
+      }
+      if title == "Device" {
+        menu.addItem(.separator())
+        menu.addItem(withTitle: "Mouse Pointer", action: #selector(toggleMouseMode(_:)), keyEquivalent: "M")  // ⌘⇧M
+      }
+      let item = NSMenuItem(title: title, action: nil, keyEquivalent: "")
+      item.submenu = menu
+      return item
     }
-    let item = NSMenuItem(title: "Device", action: nil, keyEquivalent: "")
-    item.submenu = menu
-    return item
-  }
-
-  private func addSoftButtons(to window: NSWindow) {
-    let stack = NSStackView(views: Self.buttons.enumerated().map { i, b in
-      let button = NSButton(
-        image: NSImage(systemSymbolName: b.symbol, accessibilityDescription: b.label)!, target: self,
-        action: #selector(softButton(_:)))
-      button.isBordered = false
-      button.tag = i
-      button.toolTip = b.label
-      return button
-    })
-    stack.spacing = 10
-    stack.edgeInsets = NSEdgeInsets(top: 0, left: 0, bottom: 0, right: 10)
-    stack.frame.size = stack.fittingSize  // trailing accessories are sized by frame, not constraints
-    let accessory = NSTitlebarAccessoryViewController()
-    accessory.view = stack
-    accessory.layoutAttribute = .trailing
-    window.addTitlebarAccessoryViewController(accessory)
   }
 
   @objc func softButton(_ sender: Any) {
-    if let view { Self.buttons[(sender as? NSButton)?.tag ?? (sender as! NSMenuItem).tag].action(view) }
+    let i = (sender as? NSToolbarItemGroup)?.selectedIndex ?? (sender as! NSMenuItem).tag
+    if let view { Self.buttons[i].action(view) }
   }
 
   @objc func showLog(_ sender: Any?) { NSWorkspace.shared.open(Self.log(name)) }
+
+  /// Per window and not saved: every start is in touch mode.
+  @objc func toggleMouseMode(_ sender: Any?) { view?.mouseMode.toggle() }
 
   /// Android shuts down and powers the VM off, while the window says so; QEMU itself would just pull the plug on /data.
   /// Returns once QEMU has exited.
@@ -253,9 +249,37 @@ final class Machine: NSObject, NSWindowDelegate {
     waiters = []
   }
 
+  /// ⌘-Tab, another window or closing gives the Mac its pointer back.
+  func windowDidResignKey(_ note: Notification) { view?.capture(false) }
+
   /// Closing the window stops the device, with the window still there to show it shutting down.
   func windowShouldClose(_ sender: NSWindow) -> Bool {
     Task { await stop() }
     return false
   }
+}
+
+extension Machine: NSMenuItemValidation {
+  func validateMenuItem(_ item: NSMenuItem) -> Bool {
+    if item.action == #selector(toggleMouseMode(_:)) { item.state = view?.mouseMode == true ? .on : .off }
+    return true
+  }
+}
+
+extension Machine: NSToolbarDelegate {
+  private static let softButtons = NSToolbarItem.Identifier("softButtons")
+
+  func toolbar(
+    _ toolbar: NSToolbar, itemForItemIdentifier id: NSToolbarItem.Identifier, willBeInsertedIntoToolbar: Bool
+  ) -> NSToolbarItem? {
+    let device = Self.buttons.filter { $0.menu == "Device" }
+    let group = NSToolbarItemGroup(
+      itemIdentifier: id, images: device.map { NSImage(systemSymbolName: $0.symbol, accessibilityDescription: $0.label)! },
+      selectionMode: .momentary, labels: device.map(\.label), target: self, action: #selector(softButton(_:)))
+    for (item, b) in zip(group.subitems, device) { item.toolTip = b.label }
+    return group
+  }
+
+  func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] { [.flexibleSpace, Self.softButtons] }
+  func toolbarAllowedItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] { toolbarDefaultItemIdentifiers(toolbar) }
 }
