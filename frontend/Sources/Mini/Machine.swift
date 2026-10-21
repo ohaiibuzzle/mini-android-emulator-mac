@@ -255,6 +255,11 @@ final class Machine: NSObject, NSWindowDelegate {
     view?.pad(Gamepad.rest)
   }
 
+  /// Full screen is all screen: the toolbar slides in with the menu bar, as the title bar did before it had one.
+  func window(
+    _ window: NSWindow, willUseFullScreenPresentationOptions proposed: NSApplication.PresentationOptions = []
+  ) -> NSApplication.PresentationOptions { proposed.union(.autoHideToolbar) }
+
   /// Closing the window stops the device, with the window still there to show it shutting down.
   func windowShouldClose(_ sender: NSWindow) -> Bool {
     Task { await stop() }
