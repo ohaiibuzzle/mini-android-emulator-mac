@@ -20,7 +20,7 @@ jobs:
           path: |
             build/moltenvk/LICENSE
             build/moltenvk/Package/Release/MoltenVK/dynamic/dylib/macOS
-          key: moltenvk-${{ env.MVK_VERSION }}-private-${{ hashFiles('scripts/build-moltenvk.sh') }}
+          key: moltenvk-${{ env.MVK_VERSION }}-private-${{ hashFiles('scripts/build-moltenvk.sh', 'patches/moltenvk/*.patch') }}
       - if: steps.cache.outputs.cache-hit != 'true'
         run: scripts/build-moltenvk.sh
       - uses: actions/upload-artifact@v7

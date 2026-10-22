@@ -5,7 +5,7 @@ A macOS (Apple Silicon) front-end that boots Google's goldfish/ranchu Android im
 ## Layout
 - `frontend/Sources/Mini/`: the app (SwiftPM, no dependencies). `main.swift` holds the screen view, input and app lifecycle; `Machine.swift` is one running device (its QEMU, window and frame loop), and `Fleet` the running set; `Qemu.swift` builds the command line, bootconfig and disks, and holds `GuestSetup`, which drives adb. `Modem.swift`, `Bluetooth.swift` play the host side of the guest's modem and HCI. `Devices.swift`, `Setup.swift` and `Settings.swift` are the windows and the downloads.
 - `frontend/Sources/CShm/`: a C shim, because Swift can't call the variadic `shm_open`.
-- `patches/qemu/000N-*.patch`, `patches/rutabaga_gfx/`: our changes to the third-party trees.
+- `patches/qemu/000N-*.patch`, `patches/rutabaga_gfx/`, `patches/gfxstream/`, `patches/moltenvk/`: our changes to the third-party trees (MoltenVK's checkout is `build/moltenvk`).
 - `third_party/` (git-ignored): `qemu`, `gfxstream`, `rutabaga_gfx` checkouts, plus `install/` (the built engine).
 - `scripts/`: `build-qemu.sh` (engine + MoltenVK), `bundle.sh` (→ `build/Mini.app`), `build-mini.sh [device]` (rebundle and relaunch), `gsi-image.py` (GSI import, bundled into the app), `build-shadertranslator.sh` (CI only, see below).
 - `assets/`: the app icon (`icon.svg`, rendered into the committed `Mini.icns` by `scripts/make-icon.sh`).

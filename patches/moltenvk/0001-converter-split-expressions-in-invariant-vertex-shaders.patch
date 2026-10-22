@@ -1,0 +1,33 @@
+diff --git a/MoltenVKShaderConverter/MoltenVKShaderConverter/SPIRVToMSLConverter.cpp b/MoltenVKShaderConverter/MoltenVKShaderConverter/SPIRVToMSLConverter.cpp
+index 406f4f8..3dac3e3 100644
+--- a/MoltenVKShaderConverter/MoltenVKShaderConverter/SPIRVToMSLConverter.cpp
++++ b/MoltenVKShaderConverter/MoltenVKShaderConverter/SPIRVToMSLConverter.cpp
+@@ -249,6 +249,16 @@ MVK_PUBLIC_SYMBOL void SPIRVToMSLConversionConfiguration::alignWith(const SPIRVT
+ #pragma mark -
+ #pragma mark SPIRVToMSLConverter
+ 
++// Whether any OpDecorate or OpMemberDecorate in the module marks something Invariant.
++static bool hasInvariantDecoration(const vector<uint32_t>& spirv) {
++	for (size_t i = 5; i < spirv.size(); i += max<uint32_t>(spirv[i] >> 16, 1)) {
++		uint32_t op = spirv[i] & 0xFFFF, len = spirv[i] >> 16;
++		if (op == OpDecorate && len >= 3 && i + 2 < spirv.size() && spirv[i + 2] == DecorationInvariant) { return true; }
++		if (op == OpMemberDecorate && len >= 4 && i + 3 < spirv.size() && spirv[i + 3] == DecorationInvariant) { return true; }
++	}
++	return false;
++}
++
+ MVK_PUBLIC_SYMBOL void SPIRVToMSLConverter::setSPIRV(const uint32_t* spirvCode, size_t length) {
+ 	_spirv.clear();			// Clear for reuse
+ 	_spirv.reserve(length);
+@@ -300,6 +310,11 @@ MVK_PUBLIC_SYMBOL bool SPIRVToMSLConverter::convert(SPIRVToMSLConversionConfigur
+ 		auto scOpts = pMSLCompiler->get_common_options();
+ 		scOpts.vertex.flip_vert_y = shaderConfig.options.shouldFlipVertexY;
+ 		scOpts.vertex.fixup_clipspace = shaderConfig.options.shouldFixupClipSpace;
++		// SPIRV-Cross only splits an invariant position into one op per statement when it's stored straight to the output,
++		// not when it goes through a local first, so two shaders can spell the same math differently. With preserveInvariance
++		// Metal then rounds them differently and depth-equal passes fail (UE4 foliage). Splitting every expression keeps them alike.
++		// shortcut: splits the whole shader, not just the position's chain; upgrade when SPIRV-Cross follows stores through locals.
++		scOpts.force_temporary = shaderConfig.options.entryPointStage == ExecutionModelVertex && hasInvariantDecoration(_spirv);
+ 		pMSLCompiler->set_common_options(scOpts);
+ 
+ 		// Add shader inputs and outputs
