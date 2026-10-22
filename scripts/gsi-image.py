@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
 """Makes an emulator system-image dir that boots a GSI on Google's goldfish kernel/vendor, without super.
 
-Usage: scripts/gsi-image.py <google sysdir> <gsi system.img or .img.xz (ext4/erofs)> <out sysdir> [display name]
+Usage: scripts/gsi-image.py [--secure] <google sysdir> <gsi system.img or .img.xz (ext4/erofs)> <out sysdir> [display name]
 Out dir gets Google's files (APFS clones) plus:
   system.img  plain GPT: gsi_system, gsi_vendor, gsi_system_dlkm (the last two copied out of Google's super)
   ramdisk.img Google's ramdisk + an appended cpio whose fstab.ranchu mounts those by-name instead of `logical`.
 vendor's own /etc/fstab.ranchu (what vold reads after switch_root) gets the same rewrite, and vendor
 declares android.software.freeform_window_management (pair with a freeform AVD: display.settings.xml=freeform).
+Every build.prop gets a stock Pixel 9's build and product props, and system an init rc installing the host's adb key.
+--secure turns on TrebleDroid's securize (no su, ro.adb.secure=1). Both need an ext4 GSI.
 source.properties gets the out dir's tag (its parent dir name) and the display name, so AVDs label it.
 Needs lz4 and e2fsprogs (brew install lz4 e2fsprogs).
 """
@@ -23,6 +25,39 @@ FREEFORM = """<?xml version="1.0" encoding="utf-8"?>
 </permissions>
 """
 E2FS = "/opt/homebrew/opt/e2fsprogs/sbin"  # keg-only in Homebrew
+# A Pixel 9 (tokay) September 2026 build, from Google's binary transparency log; that's the goldfish vendor's patch level.
+PIXEL_ID, PIXEL_INC = "CP3A.260905.009", "16091614"
+PIXEL = [
+    (r"ro\.(?:\w+\.)?build\.fingerprint", f"google/tokay/tokay:17/{PIXEL_ID}/{PIXEL_INC}:user/release-keys"),
+    (r"ro\.(?:\w+\.)?build\.(?:display\.)?id", PIXEL_ID),
+    (r"ro\.(?:\w+\.)?build\.version\.incremental", PIXEL_INC),
+    (r"ro\.(?:\w+\.)?build\.type", "user"),
+    (r"ro\.(?:\w+\.)?build\.tags", "release-keys"),
+    (r"ro\.build\.flavor", "tokay-user"),
+    (r"ro\.build\.description", f"tokay-user 17 {PIXEL_ID} {PIXEL_INC} release-keys"),
+    (r"ro\.build\.product", "tokay"),
+    (r"ro\.product\.(?:\w+\.)?(?:name|device)", "tokay"),
+    (r"ro\.product\.(?:\w+\.)?brand", "google"),
+    (r"ro\.product\.(?:\w+\.)?manufacturer", "Google"),
+    (r"ro\.product\.(?:\w+\.)?model", "Pixel 9"),
+    (r"ro\.product\.board", "tokay"),
+]
+# The Vulkan HAL a Pixel 9 loads; goldfish's ranchu driver is linked under this name and the bootconfig points at it.
+VULKAN = "mali"
+# Google's system_ext installs the host's adb key (init.adb-setup.ranchu.sh); a GSI replaces system_ext, and
+# without the key a secure adbd leaves Mini's adb unauthorized.
+ADB_RC = """on post-fs-data && property:ro.boot.qemu.adb.pubkey=*
+    write /data/misc/adb/adb_keys ${ro.boot.qemu.adb.pubkey}
+    chown system shell /data/misc/adb/adb_keys
+    chmod 0640 /data/misc/adb/adb_keys
+"""
+# shortcut: renamed only once every HAL has looked its module up by ro.hardware (init imports, libhardware); one
+# restarted later looks for a tokay module and fails. Upgrade: give the ranchu rc, fstabs and HALs a second name.
+LATE_RC = """
+on property:sys.boot_completed=1
+    exec u:r:phhsu_daemon:s0 root -- /system/bin/resetprop_phh ro.hardware tokay
+    exec u:r:phhsu_daemon:s0 root -- /system/bin/resetprop_phh ro.boot.hardware tokay
+"""
 
 
 def gpt_read(path):
@@ -181,7 +216,16 @@ def fix_init_rc(text):
     return text[:i + len(bad)] + "on post-fs\n" + text[i + len(bad):]
 
 
-def main(base, gsi, out, display="GSI"):
+def spoof(text):
+    """A build.prop with a stock Pixel 9's build and product props in place of the ones it has."""
+    for key, value in PIXEL:
+        text = re.sub(rf"^({key})=.*$", lambda m: f"{m[1]}={value}", text, flags=re.M)
+    return re.sub(r"^ro\.kernel\.qemu=.*\n", "", text, flags=re.M)  # nothing on goldfish reads it any more
+
+
+def main(base, gsi, out, display="GSI", secure=False):
+    assert spoof("ro.product.cpu.abi=a\nro.product.vendor.model=b\nro.kernel.qemu=1\nro.system.build.type=userdebug\n") \
+        == "ro.product.cpu.abi=a\nro.product.vendor.model=Pixel 9\nro.system.build.type=user\n"
     os.makedirs(out, exist_ok=True)
     for name in os.listdir(base):
         if name not in ("system.img", "ramdisk.img"):
@@ -203,6 +247,14 @@ def main(base, gsi, out, display="GSI"):
     # Declares freeform support up front, so a freeform AVD profile gets desktop windows without the dev option.
     ext4_edit(vendor, "/etc/permissions/android.software.freeform_window_management.xml", lambda _: FREEFORM,
               like="/etc/fstab.ranchu")
+    # Vendor too: TrebleDroid's securize copies the vendor's identity over the system's.
+    for path in ("/build.prop", "/odm/etc/build.prop"):
+        ext4_edit(vendor, path, spoof)
+    # A hard link: same inode, so the same label and mode, and no space. debugfs's ln leaves the link count to us.
+    hal = "/lib64/hw/vulkan.ranchu.so"
+    inode = re.search(r"Inode:\s+(\d+)", e2("debugfs", "-R", f"stat {hal}", vendor)).group(1)
+    e2("debugfs", "-w", "-f", "-", vendor, input=f"ln {hal} /lib64/hw/vulkan.{VULKAN}.so\nsif <{inode}> links_count 2\n")
+    e2("e2fsck", "-fn", vendor)
     system = os.path.join(tmp, "system.img")
     if gsi.endswith(".xz"):
         with lzma.open(gsi) as src, open(system, "wb") as dst:
@@ -212,9 +264,21 @@ def main(base, gsi, out, display="GSI"):
     with open(system, "rb") as f:
         head = f.read(1024 + 0x78)
     is_ext4 = head[1080:1082] == b"\x53\xef"
-    # shortcut: erofs GSIs can't be edited here, so they get no init.rc fix; unpack/repack with mkfs.erofs if one needs it.
-    if is_ext4 and e2("debugfs", "-R", "stat /system/etc/init/hw/init.rc", system).strip():
-        ext4_edit(system, "/system/etc/init/hw/init.rc", fix_init_rc)
+    # shortcut: erofs GSIs can't be edited here, so they get no init.rc fix, Pixel props or securize; unpack/repack
+    # with mkfs.erofs if one needs them.
+    rc = "/system/etc/init/hw/init.rc"
+    if is_ext4 and e2("debugfs", "-R", f"stat {rc}", system).strip():
+        ext4_edit(system, rc, fix_init_rc)
+        for path in ("/system/build.prop", "/system/system_ext/etc/build.prop", "/system/product/etc/build.prop"):
+            ext4_edit(system, path, spoof)
+        # TrebleDroid's resetprop_phh, run as its own init domain, can rewrite ro.* props after boot.
+        late = LATE_RC if e2("debugfs", "-R", "stat /system/bin/resetprop_phh", system).strip() else ""
+        ext4_edit(system, "/system/etc/init/mini-adb.rc", lambda _: ADB_RC + late, like=rc)
+        # TrebleDroid's rw-system.sh then hides its su, sets ro.adb.secure=1 and reports a locked, verified boot.
+        if secure and e2("debugfs", "-R", "stat /system/phh", system).strip():
+            ext4_edit(system, "/system/phh/secure", lambda _: "1\n", like=rc)
+        elif secure:
+            print("not a TrebleDroid GSI (no /system/phh); securize skipped")
     whole = lambda path: [(path, [(0, os.path.getsize(path))])]
     sources = {"system": whole(system), "vendor": whole(vendor), "system_dlkm": [(sysimg, lp["system_dlkm"])]}
     gpt_write(os.path.join(out, "system.img"), [(LABEL + p, sources[p], sum(n for _, segs in sources[p] for _, n in segs)) for p in PARTS])
@@ -248,11 +312,14 @@ def main(base, gsi, out, display="GSI"):
         text = re.sub(rf"^{re.escape(key)}=.*$", lambda _: f"{key}={value}", text, flags=re.M)
     with open(props, "w") as f:
         f.write(text)
+    with open(os.path.join(out, "VerifiedBootParams.textproto"), "a") as f:  # Qemu.bootconfig lets these override its own
+        f.write(f'param: "androidboot.hardware.vulkan={VULKAN}"\n')
     print(fstab)
     print(f"wrote {out}")
 
 
 if __name__ == "__main__":
-    if len(sys.argv) not in (4, 5):
+    args = [a for a in sys.argv[1:] if a != "--secure"]
+    if len(args) not in (3, 4):
         sys.exit(__doc__)
-    main(*sys.argv[1:])
+    main(*args, secure="--secure" in sys.argv)

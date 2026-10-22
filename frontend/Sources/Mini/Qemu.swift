@@ -57,8 +57,6 @@ enum Qemu {
       // Vendor init copies it to ro.hardware.egl. "emulation" is goldfish's GLES driver, streaming to the host decoder.
       ("hardwareegl", config.hostGLES ? "emulation" : "angle"),
       ("opengles.version", "196609"),
-      ("qemu", "1"),
-      ("qemu.avd_name", avd),
       ("qemu.gltransport.drawFlushInterval", "800"),
       ("qemu.gltransport.name", "virtio-gpu-asg"),
       ("qemu.settings.system.screen_off_timeout", "2147483647"),
@@ -67,13 +65,18 @@ enum Qemu {
       ("serialno", "EMULATOR37X3X4X0"),
       ("veritymode", "enforcing"),
     ]
+    // Apps read ro.boot.qemu as "emulator" (Build.IS_EMULATOR); a GSI boots without it, Google's images need it.
+    if !config.sysdir.contains("/gsi_") { kv += [("qemu", "1"), ("qemu.avd_name", avd)] }
     if let adbKey { kv.append(("qemu.adb.pubkey", adbKey)) }
     if logcat { kv.append(("logcat", "*:W")) }
     if config.freeform { kv.append(("qemu.display.settings.xml", "freeform")) }
-    // VerifiedBootParams.textproto: `param: "androidboot.vbmeta.size=6784"`.
+    // VerifiedBootParams.textproto: `param: "androidboot.vbmeta.size=6784"`. The image's own params win, so a GSI
+    // can rename its Vulkan driver.
     for p in vbmeta {
       guard let eq = p.firstIndex(of: "="), p.hasPrefix("androidboot.") else { continue }
-      kv.append((String(p[p.index(p.startIndex, offsetBy: 12)..<eq]), String(p[p.index(after: eq)...])))
+      let key = String(p[p.index(p.startIndex, offsetBy: 12)..<eq])
+      kv.removeAll { $0.0 == key }
+      kv.append((key, String(p[p.index(after: eq)...])))
     }
     return kv
   }

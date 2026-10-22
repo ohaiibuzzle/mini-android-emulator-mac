@@ -19,9 +19,14 @@ import Testing
   var c = DeviceConfig()
   c.freeform = true
   let kv = Dictionary(uniqueKeysWithValues: Qemu.bootconfig(
-    avd: "p", config: c, vbmeta: ["androidboot.vbmeta.size=6784", "bogus"], adbKey: nil, logcat: false))
-  #expect(kv["vbmeta.size"] == "6784" && kv["qemu.skin"] == "1080x2400" && kv["qemu.display.settings.xml"] == "freeform")
+    avd: "p", config: c, vbmeta: ["androidboot.vbmeta.size=6784", "androidboot.hardware.vulkan=mali", "bogus"], adbKey: nil, logcat: false))
+  #expect(kv["vbmeta.size"] == "6784" && kv["qemu.skin"] == "1080x2400" && kv["qemu.display.settings.xml"] == "freeform"
+    && kv["hardware.vulkan"] == "mali")
   #expect(kv["hardware.gltransport"] == "virtio-gpu-asg" && kv["qemu.adb.pubkey"] == nil && kv["hardwareegl"] == "angle")
+  #expect(kv["qemu"] == "1")
+  c.sysdir = "system-images/android-37.0/gsi_x/arm64-v8a/"
+  let gsi = Dictionary(uniqueKeysWithValues: Qemu.bootconfig(avd: "p", config: c, vbmeta: [], adbKey: nil, logcat: false))
+  #expect(gsi["qemu"] == nil && gsi["qemu.avd_name"] == nil && gsi["qemu.skin"] == "1080x2400")
 }
 
 @Test func hostGLESSwitchesTheGuestDriverAndHostRenderer() {

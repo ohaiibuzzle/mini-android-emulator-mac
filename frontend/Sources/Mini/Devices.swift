@@ -168,13 +168,13 @@ enum GSIImport {
     return BaseImage.sysdir.replacingOccurrences(of: "/google_apis/", with: "/\(tag)/")
   }
 
-  static func run(gsi: URL, name: String) async throws -> SystemImage {
+  static func run(gsi: URL, name: String, secure: Bool) async throws -> SystemImage {
     let out = Prefs.home + "/" + sysdir(for: name)
     try FileManager.default.createDirectory(at: log.deletingLastPathComponent(), withIntermediateDirectories: true)
     FileManager.default.createFile(atPath: log.path, contents: nil)
     let p = Process()
     p.executableURL = URL(fileURLWithPath: "/usr/bin/python3")
-    p.arguments = ["-I", script, BaseImage.dir, gsi.path, out, name]
+    p.arguments = ["-I", script] + (secure ? ["--secure"] : []) + [BaseImage.dir, gsi.path, out, name]
     p.environment = ["PATH": "\(brew)/bin:/usr/bin:/bin:/usr/sbin:/sbin", "HOME": NSHomeDirectory()]
     let h = try FileHandle(forWritingTo: log)
     p.standardOutput = h
@@ -375,6 +375,7 @@ struct NewDeviceView: View {
   @State private var images = SystemImage.installed()
   @State private var image: SystemImage?
   @State private var gsi: URL?
+  @State private var secure = true
   @State private var config = DeviceConfig()
   @State private var busy = false
   @State private var error: String?
@@ -427,6 +428,8 @@ struct NewDeviceView: View {
           Button(gsi?.lastPathComponent ?? "Choose…", action: chooseGSI)
         }
         Text("Currently only supports Android 17 GSIs.").font(.caption).foregroundStyle(.secondary)
+        // TrebleDroid's securize: hides its su and turns on adb authentication; root shell is gone for good.
+        Toggle("Hide root (securize)", isOn: $secure)
         if GSIImport.missingTools {
           Text("Import needs lz4 and e2fsprogs: brew install lz4 e2fsprogs").font(.caption).foregroundStyle(.red)
             .textSelection(.enabled)
@@ -482,7 +485,7 @@ struct NewDeviceView: View {
     Task {
       do {
         let img: SystemImage
-        if source == .gsi, let gsi { img = try await GSIImport.run(gsi: gsi, name: name) } else { img = image! }
+        if source == .gsi, let gsi { img = try await GSIImport.run(gsi: gsi, name: name, secure: secure) } else { img = image! }
         try Devices.create(name: name, image: img, config: config)
         done(name)
       } catch {
