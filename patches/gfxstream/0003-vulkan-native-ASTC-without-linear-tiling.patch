@@ -1,0 +1,17 @@
+diff --git a/host/vulkan/vk_decoder_global_state.cpp b/host/vulkan/vk_decoder_global_state.cpp
+index 8b7fe37f..5d4deeac 100644
+--- a/host/vulkan/vk_decoder_global_state.cpp
++++ b/host/vulkan/vk_decoder_global_state.cpp
+@@ -10714,9 +10714,9 @@ class VkDecoderGlobalState::Impl {
+             VkFormatProperties props;
+             vk->vkGetPhysicalDeviceFormatProperties(physicalDevice, format, &props);
+ 
+-            if ((props.linearTilingFeatures & requiredTilingFeatures) != requiredTilingFeatures ||
+-                (props.optimalTilingFeatures & requiredTilingFeatures) != requiredTilingFeatures) {
+-                // Linear tiling is not supported, emulate
++            // Only optimal tiling: Metal has no linear compressed textures, and native ASTC beats
++            // the compute decoder. A linear ASTC image then fails to create.
++            if ((props.optimalTilingFeatures & requiredTilingFeatures) != requiredTilingFeatures) {
+                 return true;
+             }
+         }
