@@ -68,10 +68,10 @@ index d345f6c..3e9e7f4 100644
    'ui-qmp-cmds.c',
 diff --git a/ui/mini.c b/ui/mini.c
 new file mode 100644
-index 0000000..f103b00
+index 0000000..f4ce67c
 --- /dev/null
 +++ b/ui/mini.c
-@@ -0,0 +1,338 @@
+@@ -0,0 +1,356 @@
 +/*
 + * mini-display: hands the first graphic console to the Mini front-end.
 + *
@@ -80,9 +80,10 @@ index 0000000..f103b00
 + * Mini creates the POSIX shared memory object </name> (a file's pages would
 + * keep being written back to disk) holding two RGBX frames of up to
 + * <side>x<side>, side being the longer screen edge, and connects to the
-+ * chardev. On every update the
-+ * console is copied, turned by the current rotation, into the frame Mini
-+ * isn't showing and a FrameMsg names it. Mini sends InputMsgs back: touch
++ * chardev. On every guest flush the scanout goes into the frame Mini isn't
++ * showing and a FrameMsg names it, with the rotation Mini turns it by. With
++ * gfxstream the GPU copies it there; otherwise (host GLES, another format)
++ * the console surface, read back from the GPU, is. Mini sends InputMsgs back: touch
 + * in panel pixels (to the virtio multitouch screen), pointer motion (to the
 + * virtio mouse), Linux or macOS key codes, evdev events for the
 + * virtio-gamepad (Mini ends each batch with EV_SYN), and the device
@@ -101,6 +102,8 @@ index 0000000..f103b00
 +#include "ui/console.h"
 +#include "ui/input.h"
 +#include "hw/virtio/virtio-input.h"
++#include "hw/virtio/virtio-gpu.h"
++#include <dlfcn.h>
 +#include <sys/mman.h>
 +
 +#define TYPE_MINI_DISPLAY "mini-display"
@@ -141,64 +144,75 @@ index 0000000..f103b00
 +    size_t out_sent;    /* bytes of it already sent; sizeof(out) when none pending */
 +};
 +
++/*
++ * Messages are fixed-size and the socket is non-blocking: finish a partly
++ * sent one before anything else, or Mini's framing slips for good. Until
++ * then frames are skipped rather than block the main loop. False: still pending.
++ */
++static bool mini_flush_pending(MiniDisplay *s)
++{
++    if (s->out_sent < sizeof(s->out)) {
++        int n = qemu_chr_fe_write(&s->chr, (uint8_t *)&s->out + s->out_sent,
++                                  sizeof(s->out) - s->out_sent);
++        s->out_sent += MAX(n, 0);
++    }
++    return s->out_sent == sizeof(s->out);
++}
++
++static void mini_send(MiniDisplay *s, uint32_t width, uint32_t height)
++{
++    s->out = (FrameMsg){ width, height, s->rotation & 3, s->buffer };
++    int n = qemu_chr_fe_write(&s->chr, (uint8_t *)&s->out, sizeof(s->out));
++    s->out_sent = n > 0 ? n : sizeof(s->out);  /* nothing sent: the frame is just dropped */
++}
++
 +static void mini_update(DisplayChangeListener *dcl, int x, int y, int w, int h)
 +{
 +    MiniDisplay *s = container_of(dcl, MiniDisplay, dcl);
 +    DisplaySurface *surf = qemu_console_surface(dcl->con);
 +
 +    /* Flips pass through QEMU's "Display output is not active" placeholder. */
-+    if (!surf || surface_is_placeholder(surf) || !qemu_chr_fe_backend_open(&s->chr)) {
++    if (!surf || surface_is_placeholder(surf) || !qemu_chr_fe_backend_open(&s->chr) ||
++        !mini_flush_pending(s)) {
 +        return;
 +    }
-+    /*
-+     * Messages are fixed-size and the socket is non-blocking: finish a
-+     * partly sent one before anything else, or Mini's framing slips for
-+     * good. Until then skip frames rather than block the main loop.
-+     */
-+    if (s->out_sent < sizeof(s->out)) {
-+        int n = qemu_chr_fe_write(&s->chr, (uint8_t *)&s->out + s->out_sent,
-+                                  sizeof(s->out) - s->out_sent);
-+        s->out_sent += MAX(n, 0);
-+        if (s->out_sent < sizeof(s->out)) {
-+            return;
-+        }
-+    }
 +    int pw = surface_width(surf), ph = surface_height(surf);
-+    bool turned = s->rotation & 1;
-+    int dw = turned ? ph : pw, dh = turned ? pw : ph;
 +    size_t half = s->map_size / 2;
-+    if ((size_t)dw * dh * 4 > half) {
++    if ((size_t)pw * ph * 4 > half) {
 +        return;
 +    }
 +    s->buffer ^= 1;
-+    pixman_image_t *dst = pixman_image_create_bits(PIXMAN_a8b8g8r8, dw, dh,
-+        (uint32_t *)(s->map + s->buffer * half), dw * 4);
-+    /* Destination pixel -> panel pixel, the inverse of Mini's panelPoint(). */
-+    pixman_transform_t t;
-+    pixman_transform_init_identity(&t);
-+    switch (s->rotation & 3) {
-+    case 1:  /* panel x = W - y, panel y = x */
-+        pixman_transform_init_rotate(&t, 0, pixman_fixed_1);
-+        pixman_transform_translate(&t, NULL, pixman_int_to_fixed(pw), 0);
-+        break;
-+    case 2:  /* x = W - x, y = H - y */
-+        pixman_transform_init_rotate(&t, pixman_fixed_minus_1, 0);
-+        pixman_transform_translate(&t, NULL, pixman_int_to_fixed(pw), pixman_int_to_fixed(ph));
-+        break;
-+    case 3:  /* x = y, y = H - x */
-+        pixman_transform_init_rotate(&t, 0, pixman_fixed_minus_1);
-+        pixman_transform_translate(&t, NULL, 0, pixman_int_to_fixed(ph));
-+        break;
-+    }
-+    pixman_image_set_transform(surf->image, &t);
-+    /* shortcut: copies the whole frame on every update; upgrade to dirty rects or zero-copy if it shows in profiles. */
-+    pixman_image_composite(PIXMAN_OP_SRC, surf->image, NULL, dst, 0, 0, 0, 0, 0, 0, dw, dh);
-+    pixman_image_set_transform(surf->image, NULL);
++    pixman_image_t *dst = pixman_image_create_bits(PIXMAN_a8b8g8r8, pw, ph,
++        (uint32_t *)(s->map + s->buffer * half), pw * 4);
++    pixman_image_composite(PIXMAN_OP_SRC, surf->image, NULL, dst, 0, 0, 0, 0, 0, 0, pw, ph);
 +    pixman_image_unref(dst);
++    mini_send(s, pw, ph);
++}
 +
-+    s->out = (FrameMsg){ dw, dh, s->rotation & 3, s->buffer };
-+    int n = qemu_chr_fe_write(&s->chr, (uint8_t *)&s->out, sizeof(s->out));
-+    s->out_sent = n > 0 ? n : sizeof(s->out);  /* nothing sent: the frame is just dropped */
++/* gfxstream's GPU copy into host memory, if this gfxstream has it. */
++static int (*mini_gpu_copy)(uint32_t resource_id, void *base, uint64_t size, uint64_t offset);
++static MiniDisplay *mini_gpu_display;
++
++/* The guest flushed its scanout resource: copy it on the GPU, no readback. */
++static bool mini_scanout(uint32_t resource_id, uint32_t width, uint32_t height)
++{
++    MiniDisplay *s = mini_gpu_display;
++    size_t half = s->map_size / 2;
++
++    if (!mini_gpu_copy || !qemu_chr_fe_backend_open(&s->chr) ||
++        (size_t)width * height * 4 > half) {
++        return false;
++    }
++    if (!mini_flush_pending(s)) {
++        return true;  /* dropped, as mini_update does */
++    }
++    if (mini_gpu_copy(resource_id, s->map, s->map_size, (s->buffer ^ 1) * half)) {
++        mini_gpu_copy = NULL;  /* host GLES, another format or no import: that holds all run */
++        return false;
++    }
++    s->buffer ^= 1;
++    mini_send(s, width, height);
++    return true;
 +}
 +
 +/* A new surface is empty until the guest's next flush, which sends it. */
@@ -298,8 +312,9 @@ index 0000000..f103b00
 +        if (vsock) {
 +            object_property_set_uint(vsock, "rotation", s->rotation * 90, NULL);
 +        }
-+        if (surf) {
-+            mini_update(&s->dcl, 0, 0, surface_width(surf), surface_height(surf));
++        /* Frames aren't turned here: the last one, named again, turns in Mini. */
++        if (s->out.width && qemu_chr_fe_backend_open(&s->chr) && mini_flush_pending(s)) {
++            mini_send(s, s->out.width, s->out.height);
 +        }
 +        break;
 +    }
@@ -380,6 +395,9 @@ index 0000000..f103b00
 +        return;
 +    }
 +    qemu_chr_fe_set_handlers(&s->chr, mini_can_read, mini_read, mini_event, NULL, s, NULL, true);
++    mini_gpu_copy = dlsym(RTLD_DEFAULT, "stream_renderer_mini_scanout");
++    mini_gpu_display = s;
++    virtio_gpu_rutabaga_scanout = mini_scanout;
 +    s->init_done.notify = mini_init_done;
 +    qemu_add_machine_init_done_notifier(&s->init_done);
 +}

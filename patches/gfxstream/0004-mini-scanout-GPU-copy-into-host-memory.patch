@@ -1,0 +1,321 @@
+diff --git a/host/frame_buffer.cpp b/host/frame_buffer.cpp
+index 473fcea..56ddf49 100644
+--- a/host/frame_buffer.cpp
++++ b/host/frame_buffer.cpp
+@@ -4576,6 +4576,12 @@ void FrameBuffer::readColorBuffer(HandleType p_colorbuffer, int x, int y, int wi
+     mImpl->readColorBuffer(p_colorbuffer, x, y, width, height, pixelsFormat, pixels, outPixelsSize);
+ }
+ 
++bool FrameBuffer::readColorBufferToHostMemory(HandleType p_colorbuffer, void* base, uint64_t size,
++                                              uint64_t offset) {
++    return mImpl->hasEmulationVk() &&
++           mImpl->getEmulationVk().readColorBufferToHostMemory(p_colorbuffer, base, size, offset);
++}
++
+ void FrameBuffer::readColorBufferDeprecated(HandleType colorbuffer, int x, int y, int width,
+                                             int height, GLenum pixelsFormat, GLenum pixelsType,
+                                             void* pixels, uint64_t pixelsSize) {
+diff --git a/host/frame_buffer.h b/host/frame_buffer.h
+index adb25ce..019164f 100644
+--- a/host/frame_buffer.h
++++ b/host/frame_buffer.h
+@@ -217,6 +217,9 @@ class FrameBuffer : public gfxstream::base::EventNotificationSupport<FrameBuffer
+     // |outPixelsSize| is the size of buffer
+     void readColorBuffer(HandleType p_colorbuffer, int x, int y, int width, int height,
+                          GfxstreamFormat pixelsFormat, void* pixels, uint64_t outPixelsSize);
++    // Mini: see VkEmulation::readColorBufferToHostMemory(). False without Vulkan.
++    bool readColorBufferToHostMemory(HandleType p_colorbuffer, void* base, uint64_t size,
++                                     uint64_t offset);
+     void readColorBufferDeprecated(HandleType p_colorbuffer, int x, int y, int width, int height,
+                                    GLenum format, GLenum type, void* pixels,
+                                    uint64_t outPixelsSize);
+diff --git a/host/include/gfxstream/virtio-gpu-gfxstream-renderer-unstable.h b/host/include/gfxstream/virtio-gpu-gfxstream-renderer-unstable.h
+index 5f5eae0..53a28b9 100644
+--- a/host/include/gfxstream/virtio-gpu-gfxstream-renderer-unstable.h
++++ b/host/include/gfxstream/virtio-gpu-gfxstream-renderer-unstable.h
+@@ -61,6 +61,11 @@ VG_EXPORT void gfxstream_backend_setup_window(void* native_window_handle, int32_
+ 
+ VG_EXPORT void stream_renderer_flush(uint32_t res_handle);
+ 
++// Mini: copies the scanout resource's pixels (RGBA8) on the GPU into page-aligned host memory
++// |base| (|size| bytes, imported once) at |offset|. Nonzero when it can't; read it back instead.
++VG_EXPORT int stream_renderer_mini_scanout(uint32_t res_handle, void* base, uint64_t size,
++                                           uint64_t offset);
++
+ VG_EXPORT void* stream_renderer_platform_create_shared_egl_context(void);
+ VG_EXPORT int stream_renderer_platform_destroy_shared_egl_context(void*);
+ 
+diff --git a/host/virtio_gpu_frontend.cpp b/host/virtio_gpu_frontend.cpp
+index 3b5eaaf..412c026 100644
+--- a/host/virtio_gpu_frontend.cpp
++++ b/host/virtio_gpu_frontend.cpp
+@@ -623,6 +623,18 @@ int VirtioGpuFrontend::transferWriteIov(int resId, uint64_t offset, stream_rende
+     return resource.TransferWrite(offset, box, AsVecOption(iov, iovec_cnt));
+ }
+ 
++int VirtioGpuFrontend::miniScanout(int resId, void* base, uint64_t size, uint64_t offset) {
++    auto it = mResources.find(resId);
++    if (it == mResources.end()) {
++        return EINVAL;
++    }
++    auto handle = it->second.GetColorBufferHandle();
++    if (!handle || !FrameBuffer::getFB()->readColorBufferToHostMemory(*handle, base, size, offset)) {
++        return EINVAL;
++    }
++    return 0;
++}
++
+ void VirtioGpuFrontend::getCapset(uint32_t set, uint32_t* max_size) {
+     switch (set) {
+         case VIRTGPU_CAPSET_GFXSTREAM_VULKAN:
+diff --git a/host/virtio_gpu_frontend.h b/host/virtio_gpu_frontend.h
+index 0431560..6d6b2bc 100644
+--- a/host/virtio_gpu_frontend.h
++++ b/host/virtio_gpu_frontend.h
+@@ -77,6 +77,7 @@ class VirtioGpuFrontend {
+                         int iovec_cnt);
+     int transferWriteIov(int resId, uint64_t offset, stream_renderer_box* box, struct iovec* iov,
+                          int iovec_cnt);
++    int miniScanout(int resId, void* base, uint64_t size, uint64_t offset);
+ 
+     void getCapset(uint32_t set, uint32_t* max_size);
+     void fillCaps(uint32_t set, void* caps);
+diff --git a/host/virtio_gpu_gfxstream_renderer.cpp b/host/virtio_gpu_gfxstream_renderer.cpp
+index f974dad..295f9bf 100644
+--- a/host/virtio_gpu_gfxstream_renderer.cpp
++++ b/host/virtio_gpu_gfxstream_renderer.cpp
+@@ -443,6 +443,14 @@ VG_EXPORT int stream_renderer_resource_get_info(int res_handle,
+     return sFrontend()->getResourceInfo(res_handle, info);
+ }
+ 
++VG_EXPORT int stream_renderer_mini_scanout(uint32_t res_handle, void* base, uint64_t size,
++                                           uint64_t offset) {
++    GFXSTREAM_TRACE_EVENT(GFXSTREAM_TRACE_STREAM_RENDERER_CATEGORY,
++                          "stream_renderer_mini_scanout()");
++
++    return sFrontend()->miniScanout(res_handle, base, size, offset);
++}
++
+ VG_EXPORT void stream_renderer_flush(uint32_t res_handle) {
+     GFXSTREAM_TRACE_EVENT(GFXSTREAM_TRACE_STREAM_RENDERER_CATEGORY, "stream_renderer_flush()");
+ 
+diff --git a/host/virtio_gpu_resource.h b/host/virtio_gpu_resource.h
+index 5276ffd..61c86c3 100644
+--- a/host/virtio_gpu_resource.h
++++ b/host/virtio_gpu_resource.h
+@@ -70,6 +70,14 @@ class VirtioGpuResource {
+ 
+     VirtioGpuResourceId GetId() const { return mId; }
+ 
++    // Mini: the ColorBuffer a COLOR_BUFFER resource stands for.
++    std::optional<uint32_t> GetColorBufferHandle() const {
++        if (mResourceType != VirtioGpuResourceType::COLOR_BUFFER || !mCreateArgs) {
++            return std::nullopt;
++        }
++        return mCreateArgs->handle;
++    }
++
+     void AttachIov(struct iovec* iov, uint32_t num_iovs);
+     void DetachIov();
+ 
+diff --git a/host/vulkan/vk_common_operations.cpp b/host/vulkan/vk_common_operations.cpp
+index 50de4f4..ccaf185 100644
+--- a/host/vulkan/vk_common_operations.cpp
++++ b/host/vulkan/vk_common_operations.cpp
+@@ -426,6 +426,13 @@ void VkEmulation::appendExternalMemoryModeDeviceExtensions(
+         }
+ #endif
+     }
++#if defined(__APPLE__)
++    // Mini: readColorBufferToHostMemory() imports its frame memory.
++    if (mDeviceInfo.supportsExternalMemoryHostProps &&
++        mDeviceInfo.externalMemoryMode != ExternalMemory::Mode::HostAllocation) {
++        outDeviceExtensions.push_back(VK_EXT_EXTERNAL_MEMORY_HOST_EXTENSION_NAME);
++    }
++#endif
+ }
+ 
+ // Return true if format requires sampler YCBCR conversion for VK_IMAGE_ASPECT_COLOR_BIT image
+@@ -1790,6 +1797,7 @@ VkEmulation::~VkEmulation() {
+         }
+ 
+         mStaging.destroy(mDvk, mDevice);
++        destroyHostImportLocked();
+ 
+         mDvk->vkDestroyFence(mDevice, mCommandBufferFence, nullptr);
+         mDvk->vkFreeCommandBuffers(mDevice, mCommandPool, 1, &mCommandBuffer);
+@@ -3492,9 +3500,91 @@ bool VkEmulation::readColorBufferToBytes(uint32_t colorBufferHandle, uint32_t x,
+     return readColorBufferToBytesLocked(colorBufferHandle, x, y, w, h, outPixels, outPixelsSize);
+ }
+ 
++void VkEmulation::destroyHostImportLocked() {
++    mDvk->vkDestroyBuffer(mDevice, mHostImport.mBuffer, nullptr);
++    mDvk->vkFreeMemory(mDevice, mHostImport.mMemory, nullptr);
++    mHostImport = {};
++}
++
++bool VkEmulation::readColorBufferToHostMemory(uint32_t colorBufferHandle, void* base,
++                                              uint64_t size, uint64_t offset) {
++    std::lock_guard<std::mutex> lock(mMutex);
++    auto vk = mDvk;
++    if (!mDeviceInfo.supportsExternalMemoryHostProps) {
++        return false;
++    }
++    auto colorBufferInfo = gfxstream::base::find(mColorBuffers, colorBufferHandle);
++    if (!colorBufferInfo || !colorBufferInfo->image ||
++        colorBufferInfo->vulkanMode != VulkanMode::VulkanOnly) {
++        return false;  // a GL-backed ColorBuffer's latest pixels may be GL's
++    }
++    const VkFormat format = colorBufferInfo->imageCreateInfoShallow.format;
++    if (format != VK_FORMAT_R8G8B8A8_UNORM && format != VK_FORMAT_R8G8B8A8_SRGB) {
++        return false;
++    }
++    const VkExtent3D extent = colorBufferInfo->imageCreateInfoShallow.extent;
++    if (offset + (uint64_t)extent.width * extent.height * 4 > size) {
++        return false;
++    }
++
++    if (mHostImport.mBase != base || mHostImport.mSize != size) {
++        destroyHostImportLocked();
++        VkMemoryHostPointerPropertiesEXT hostProps = {
++            .sType = VK_STRUCTURE_TYPE_MEMORY_HOST_POINTER_PROPERTIES_EXT,
++        };
++        if (vk->vkGetMemoryHostPointerPropertiesEXT(
++                mDevice, VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT, base,
++                &hostProps) != VK_SUCCESS) {
++            return false;
++        }
++        const VkExternalMemoryBufferCreateInfo externalInfo = {
++            .sType = VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_BUFFER_CREATE_INFO,
++            .handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT,
++        };
++        const VkBufferCreateInfo bufferInfo = {
++            .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
++            .pNext = &externalInfo,
++            .size = size,
++            .usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT,
++            .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
++        };
++        if (vk->vkCreateBuffer(mDevice, &bufferInfo, nullptr, &mHostImport.mBuffer) != VK_SUCCESS) {
++            return false;
++        }
++        VkMemoryRequirements requirements;
++        vk->vkGetBufferMemoryRequirements(mDevice, mHostImport.mBuffer, &requirements);
++        const uint32_t typeBits = requirements.memoryTypeBits & hostProps.memoryTypeBits;
++        const VkImportMemoryHostPointerInfoEXT importInfo = {
++            .sType = VK_STRUCTURE_TYPE_IMPORT_MEMORY_HOST_POINTER_INFO_EXT,
++            .handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT,
++            .pHostPointer = base,
++        };
++        const VkMemoryAllocateInfo allocInfo = {
++            .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
++            .pNext = &importInfo,
++            .allocationSize = size,
++            .memoryTypeIndex = typeBits ? (uint32_t)__builtin_ctz(typeBits) : 0,
++        };
++        if (!typeBits ||
++            vk->vkAllocateMemory(mDevice, &allocInfo, nullptr, &mHostImport.mMemory) != VK_SUCCESS ||
++            vk->vkBindBufferMemory(mDevice, mHostImport.mBuffer, mHostImport.mMemory, 0) !=
++                VK_SUCCESS) {
++            GFXSTREAM_ERROR("Mini: could not import frame memory, falling back to readback.");
++            destroyHostImportLocked();
++            return false;
++        }
++        mHostImport.mBase = base;
++        mHostImport.mSize = size;
++    }
++
++    return readColorBufferToBytesLocked(colorBufferHandle, 0, 0, extent.width, extent.height,
++                                        nullptr, size - offset, mHostImport.mBuffer, offset);
++}
++
+ bool VkEmulation::readColorBufferToBytesLocked(uint32_t colorBufferHandle, uint32_t x, uint32_t y,
+                                                uint32_t w, uint32_t h, void* outPixels,
+-                                               uint64_t outPixelsSize) {
++                                               uint64_t outPixelsSize, VkBuffer dstBuffer,
++                                               VkDeviceSize dstOffset) {
+     auto vk = mDvk;
+ 
+     auto colorBufferInfo = gfxstream::base::find(mColorBuffers, colorBufferHandle);
+@@ -3525,10 +3615,13 @@ bool VkEmulation::readColorBufferToBytesLocked(uint32_t colorBufferHandle, uint3
+         return false;
+     }
+     VkDeviceSize bufferCopySize = transferInfo.stagingBufferCopySize;
+-    const std::vector<VkBufferImageCopy>& bufferImageCopies = transferInfo.bufferImageCopies;
++    std::vector<VkBufferImageCopy> bufferImageCopies = transferInfo.bufferImageCopies;
++    for (auto& copy : bufferImageCopies) {
++        copy.bufferOffset += dstOffset;
++    }
+ 
+-    const VkDeviceSize stagingBufferSize = mStaging.mAllocationSize;
+-    if (bufferCopySize > stagingBufferSize) {
++    const VkDeviceSize stagingBufferSize = dstBuffer ? outPixelsSize : mStaging.mAllocationSize;
++    if (bufferCopySize > stagingBufferSize || (dstBuffer && transferInfo.unpackFunction)) {
+         GFXSTREAM_ERROR("Failed to read ColorBuffer:%d, transfer size %" PRIu64
+                         " too large for staging buffer size:%" PRIu64 ".",
+                         colorBufferHandle, bufferCopySize, stagingBufferSize);
+@@ -3587,7 +3680,7 @@ bool VkEmulation::readColorBufferToBytesLocked(uint32_t colorBufferHandle, uint3
+                              &toTransferSrcImageBarrier);
+ 
+     vk->vkCmdCopyImageToBuffer(mCommandBuffer, colorBufferInfo->image,
+-                               transferSrcLayout, mStaging.mBuffer,
++                               transferSrcLayout, dstBuffer ? dstBuffer : mStaging.mBuffer,
+                                bufferImageCopies.size(), bufferImageCopies.data());
+ 
+     // Change back to original layout
+@@ -3657,6 +3750,10 @@ bool VkEmulation::readColorBufferToBytesLocked(uint32_t colorBufferHandle, uint3
+ 
+     VK_CHECK(vk->vkResetFences(mDevice, 1, &mCommandBufferFence));
+ 
++    if (dstBuffer) {
++        return true;  // imported host memory is coherent
++    }
++
+     if (!mStaging.mIsHostCoherent) {
+         // Invalidate host cache lines to ensure the subsequent readback
+         // will see the latest writes made by the GPU.
+diff --git a/host/vulkan/vk_common_operations.h b/host/vulkan/vk_common_operations.h
+index 6b60ac1..dc8fd1b 100644
+--- a/host/vulkan/vk_common_operations.h
++++ b/host/vulkan/vk_common_operations.h
+@@ -436,6 +436,11 @@ class VkEmulation {
+     bool readColorBufferToBytes(uint32_t colorBufferHandle, std::vector<uint8_t>* bytes);
+     bool readColorBufferToBytes(uint32_t colorBufferHandle, uint32_t x, uint32_t y, uint32_t w,
+                                 uint32_t h, void* outPixels, uint64_t outPixelsSize);
++    // Mini: copies an RGBA8 ColorBuffer on the GPU into page-aligned host memory at |offset|,
++    // importing |base| (|size| bytes, e.g. POSIX shm another process maps too) once. False when
++    // the device can't import host memory or the format isn't RGBA8; the caller falls back.
++    bool readColorBufferToHostMemory(uint32_t colorBufferHandle, void* base, uint64_t size,
++                                     uint64_t offset);
+     bool readColorBufferPixelsScaled(uint32_t colorBufferHandle, int pixelsWidth, int pixelsHeight,
+                                      GFXSTREAM_ROTATION pixelsRotation, const Rect& rect,
+                                      GfxstreamFormat pixelsFormat, void* outPixels,
+@@ -597,9 +602,11 @@ class VkEmulation {
+ 
+     bool colorBufferNeedsUpdateBetweenGlAndVk(const VkEmulation::ColorBufferInfo& colorBufferInfo);
+ 
++    // With |dstBuffer|, the GPU copies into it at |dstOffset| and |outPixels| is unused.
+     bool readColorBufferToBytesLocked(uint32_t colorBufferHandle, uint32_t x, uint32_t y,
+                                       uint32_t w, uint32_t h, void* outPixels,
+-                                      uint64_t outPixelsSize) REQUIRES(mMutex);
++                                      uint64_t outPixelsSize, VkBuffer dstBuffer = VK_NULL_HANDLE,
++                                      VkDeviceSize dstOffset = 0) REQUIRES(mMutex);
+ 
+     bool updateColorBufferFromBytesLocked(uint32_t colorBufferHandle, uint32_t x, uint32_t y,
+                                           uint32_t w, uint32_t h, const void* pixels,
+@@ -742,6 +749,15 @@ class VkEmulation {
+     // Staging buffer to perform reads and updates on color buffers.
+     StagingBuffer mStaging GUARDED_BY(mMutex);
+ 
++    // Mini's frame memory, imported by readColorBufferToHostMemory().
++    struct HostImport {
++        void* mBase = nullptr;
++        VkDeviceSize mSize = 0;
++        VkBuffer mBuffer = VK_NULL_HANDLE;
++        VkDeviceMemory mMemory = VK_NULL_HANDLE;
++    } mHostImport GUARDED_BY(mMutex);
++    void destroyHostImportLocked() REQUIRES(mMutex);
++
+     // ColorBuffers are intended to back the guest's shareable images.
+     // For example:
+     // Android: gralloc

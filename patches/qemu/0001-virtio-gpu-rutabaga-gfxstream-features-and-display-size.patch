@@ -1,8 +1,29 @@
 diff --git a/hw/display/virtio-gpu-rutabaga.c b/hw/display/virtio-gpu-rutabaga.c
-index 041216a..ddbedff 100644
+index 041216a..41415c5 100644
 --- a/hw/display/virtio-gpu-rutabaga.c
 +++ b/hw/display/virtio-gpu-rutabaga.c
-@@ -986,6 +986,11 @@ static bool virtio_gpu_rutabaga_init(VirtIOGPU *g, Error **errp)
+@@ -24,6 +24,9 @@
+        }                                                                      \
+     } while (0)
+ 
++bool (*virtio_gpu_rutabaga_scanout)(uint32_t resource_id,
++                                    uint32_t width, uint32_t height);
++
+ struct rutabaga_aio_data {
+     struct VirtIOGPURutabaga *vr;
+     struct rutabaga_fence fence;
+@@ -268,6 +271,10 @@ rutabaga_cmd_resource_flush(VirtIOGPU *g, struct virtio_gpu_ctrl_command *cmd)
+     if (!found) {
+         return;
+     }
++    if (virtio_gpu_rutabaga_scanout &&
++        virtio_gpu_rutabaga_scanout(rf.resource_id, res->width, res->height)) {
++        return;
++    }
+ 
+     transfer.x = 0;
+     transfer.y = 0;
+@@ -986,6 +993,11 @@ static bool virtio_gpu_rutabaga_init(VirtIOGPU *g, Error **errp)
      vr->rutabaga = NULL;
  
      builder.wsi = RUTABAGA_WSI_SURFACELESS;
@@ -14,7 +35,7 @@ index 041216a..ddbedff 100644
      /*
       * Currently, if WSI is specified, the only valid strings are "surfaceless"
       * or "headless".  Surfaceless doesn't create a native window surface, but
-@@ -1146,6 +1151,7 @@ static const Property virtio_gpu_rutabaga_properties[] = {
+@@ -1146,6 +1158,7 @@ static const Property virtio_gpu_rutabaga_properties[] = {
      DEFINE_PROP_STRING("wayland-socket-path", VirtIOGPURutabaga,
                         wayland_socket_path),
      DEFINE_PROP_STRING("wsi", VirtIOGPURutabaga, wsi),
@@ -23,10 +44,10 @@ index 041216a..ddbedff 100644
  
  static void virtio_gpu_rutabaga_class_init(ObjectClass *klass, const void *data)
 diff --git a/include/hw/virtio/virtio-gpu.h b/include/hw/virtio/virtio-gpu.h
-index 220231e..399c26d 100644
+index 220231e..c0b20a8 100644
 --- a/include/hw/virtio/virtio-gpu.h
 +++ b/include/hw/virtio/virtio-gpu.h
-@@ -294,6 +294,7 @@ struct VirtIOGPURutabaga {
+@@ -294,11 +294,20 @@ struct VirtIOGPURutabaga {
      uint64_t capset_mask;
      char *wayland_socket_path;
      char *wsi;
@@ -34,3 +55,16 @@ index 220231e..399c26d 100644
      bool headless;
      uint32_t num_capsets;
      struct rutabaga *rutabaga;
+ };
+ 
++/*
++ * Set by a display that can take the guest's flushed scanout resource
++ * without a readback (Mini's GPU copy). True when it did; false sends
++ * the flush down the usual readback into the console surface.
++ */
++extern bool (*virtio_gpu_rutabaga_scanout)(uint32_t resource_id,
++                                           uint32_t width, uint32_t height);
++
+ /*
+  * With 4 KiB pages and QEMU's VIRTQUEUE_MAX_SIZE (1024) mapped-iov
+  * limit, the largest inline command is ~4 MiB.  Cap submit_3d

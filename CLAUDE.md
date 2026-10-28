@@ -31,6 +31,8 @@ third_party/qemu/build-mini/pyvenv/bin/meson configure third_party/qemu/build-mi
 ## Traps already paid for
 - **No mapped files for anything hot.** macOS writes the dirty pages of an mmap'd regular file back to disk: gigabytes per minute for frame buffers. Use POSIX shm (`qemu_shm_alloc` in QEMU, `CShm` in Swift).
 - **shm sizes round up to a page** (16 KB), and `fstat` reports the rounded size. A shm object can't be `ftruncate`d twice. Any size two processes share must be page-aligned (see `FrameBuffer`).
+- **The GPU writes frames straight into that shm** (gfxstream 0004 imports the whole mapping with `VK_EXT_external_memory_host`), so its base and size must stay page-aligned. Frames arrive unrotated; `ScreenView`'s `screen` layer turns them. A ColorBuffer the GPU path can't take (host GLES, not RGBA8) switches mini-display to the readback for the rest of the run.
+- **Tag frames sRGB, in an sRGB window.** With any other colour space, Core Animation colour-matches every frame on the CPU: 11.7 ms per 2560x1600 frame, against 1.7 ms.
 - **`FileHandle.bytes` shares one serial queue across all handles.** A blocking idle reader stalls every other stream, including frames. Put long-lived blocking readers on their own `Thread` (see `Modem.run`).
 - **The radio HAL aborts on any reply it can't parse**, and that takes telephony down. Every `Modem` reply must match a parser in the HAL's `AtResponse.cpp`, and lines end in a bare `\r`.
 - **`/dev/vport7pN` names depend on device order**: the seven virtio-mmio disks/net/rng come first, then the virtio-serial ports. Adding or reordering devices renumbers them, and the boot-props in `Qemu.arguments` must follow.

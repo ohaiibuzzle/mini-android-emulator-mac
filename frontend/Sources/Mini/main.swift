@@ -16,7 +16,7 @@ final class FrameBuffer: @unchecked Sendable {
   let size: Int
 
   init(maxSide: Int, count: Int, name: String) throws {
-    // Square bound so rotation never overflows. Whole pages per frame: macOS rounds shm up to a page, and mini-display
+    // Square bound, so the panel fits whichever way round it is. Whole pages per frame: macOS rounds shm up to a page, and mini-display
     // splits the rounded size, so an unrounded frame size would shift every frame after the first.
     let page = Int(getpagesize())
     size = (maxSide * maxSide * 4 + page - 1) / page * page * count
@@ -55,6 +55,8 @@ final class ScreenView: NSView {
   let inputs: AsyncStream<Data>.Continuation  // mini-display messages
   private var lastImage: CGImage?
   private var angle: Int32 = 0
+  /// Frames come unrotated (the panel's pixels); this layer turns them. The view's own layer is AppKit's to transform.
+  private let screen = CALayer()
 
   init(name: String, guest: GuestSetup, inputs: AsyncStream<Data>.Continuation) {
     self.name = name
@@ -62,8 +64,9 @@ final class ScreenView: NSView {
     self.inputs = inputs
     super.init(frame: .zero)
     wantsLayer = true
-    layer?.contentsGravity = .resizeAspect  // letterbox, never stretch (zoom / full screen)
     layer?.backgroundColor = .black
+    screen.actions = ["contents": NSNull(), "bounds": NSNull(), "position": NSNull(), "transform": NSNull()]
+    layer?.addSublayer(screen)
     spinner.style = .spinning
     spinner.controlSize = .large
     spinner.appearance = NSAppearance(named: .darkAqua)  // visible on the black background
@@ -89,7 +92,7 @@ final class ScreenView: NSView {
       label.centerXAnchor.constraint(equalTo: centerXAnchor), label.topAnchor.constraint(equalTo: spinner.bottomAnchor, constant: 12),
     ])
     spinnerLabel = label
-    layer?.contents = nil
+    screen.contents = nil
     spinner.isHidden = false
     spinner.startAnimation(nil)
   }
@@ -110,7 +113,8 @@ final class ScreenView: NSView {
   func show(_ image: CGImage, rotation: Rotation) {
     guard spinnerLabel == nil else { return }  // shutting down
     self.rotation = rotation
-    deviceSize = CGSize(width: image.width, height: image.height)
+    let turned = rotation.rawValue & 1 == 1
+    deviceSize = CGSize(width: turned ? image.height : image.width, height: turned ? image.width : image.height)
     if !spinner.isHidden {
       spinner.stopAnimation(nil)
       spinner.isHidden = true
@@ -131,8 +135,36 @@ final class ScreenView: NSView {
       frame.origin.y = min(max(frame.minY, visible.minY), visible.maxY - frame.height)
       window.setFrame(frame, display: true)
     }
-    layer?.contents = image
+    screen.contents = image
     lastImage = image
+    placeScreen()
+  }
+
+  /// Letterboxed, never stretched (zoom / full screen), and turned by the rotation.
+  private func placeScreen() {
+    let r = imageRect, turned = rotation.rawValue & 1 == 1
+    screen.bounds = CGRect(x: 0, y: 0, width: turned ? r.height : r.width, height: turned ? r.width : r.height)
+    screen.position = CGPoint(x: r.midX, y: r.midY)
+    screen.setAffineTransform(CGAffineTransform(rotationAngle: CGFloat(rotation.rawValue) * .pi / 2))  // y-up: counter-clockwise
+  }
+
+  override func setFrameSize(_ newSize: NSSize) {
+    super.setFrameSize(newSize)
+    placeScreen()
+  }
+
+  /// The frame as it's shown. CG's y-up rotation turns the same way as the screen layer's.
+  nonisolated static func turned(_ image: CGImage, _ rotation: Rotation) -> CGImage? {
+    let w = CGFloat(image.width), h = CGFloat(image.height), odd = rotation.rawValue & 1 == 1
+    guard
+      let ctx = CGContext(
+        data: nil, width: Int(odd ? h : w), height: Int(odd ? w : h), bitsPerComponent: 8, bytesPerRow: 0,
+        space: image.colorSpace ?? CGColorSpace(name: CGColorSpace.sRGB)!, bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue)
+    else { return nil }
+    ctx.translateBy(x: CGFloat(ctx.width) / 2, y: CGFloat(ctx.height) / 2)
+    ctx.rotate(by: CGFloat(rotation.rawValue) * .pi / 2)
+    ctx.draw(image, in: CGRect(x: -w / 2, y: -h / 2, width: w, height: h))
+    return ctx.makeImage()
   }
 
   /// Turns the virtual device by `degrees` around the screen normal; the guest reorients like a real phone.
@@ -142,7 +174,7 @@ final class ScreenView: NSView {
   }
 
   func saveScreenshot() {
-    guard let image = lastImage else { return }
+    guard let last = lastImage, let image = Self.turned(last, rotation) else { return }
     let stamp = ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: ".")
     let url = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Desktop/\(name) \(stamp).png")
     guard let dest = CGImageDestinationCreateWithURL(url as CFURL, "public.png" as CFString, 1, nil) else { return }
