@@ -106,6 +106,7 @@ final class Machine: NSObject, NSWindowDelegate {
       contentRect: CGRect(x: 0, y: 0, width: screenH * 9 / 20, height: screenH),
       styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
     w.isReleasedWhenClosed = false  // Machine holds it
+    w.colorSpace = .sRGB  // matches the frames, so Core Animation doesn't colour-convert each one on the CPU
     w.title = name
     w.contentView = view
     w.delegate = self
