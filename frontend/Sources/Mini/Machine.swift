@@ -151,13 +151,26 @@ final class Machine: NSObject, NSWindowDelegate {
         for await msg in inputs { try link.write(contentsOf: msg) }
       }
       group.addTask {
-        // FrameMsg: width, height, rotation (quarter turns), which of the two frames.
-        var msg: [UInt8] = []
-        for try await byte in link.bytes {
-          msg.append(byte)
-          guard msg.count == 16 else { continue }
-          let f = msg.withUnsafeBytes { raw in (0..<4).map { Int(UInt32(littleEndian: raw.load(fromByteOffset: $0 * 4, as: UInt32.self))) } }
-          msg.removeAll(keepingCapacity: true)
+        // Its own thread: FileHandle.bytes reads every handle on one serial queue, so one guest's still screen
+        // would hold up the others' frames. Only the newest frame waits for the screen; older ones are stale.
+        let (frames, feed) = AsyncThrowingStream.makeStream(of: [Int].self, bufferingPolicy: .bufferingNewest(1))
+        Thread.detachNewThread {
+          // FrameMsg: width, height, rotation (quarter turns), which of the two frames.
+          var msg = [UInt32](repeating: 0, count: 4)
+          while true {
+            var got = 0, n = 0
+            msg.withUnsafeMutableBytes { raw in
+              while got < raw.count {
+                n = read(link.fileDescriptor, raw.baseAddress! + got, raw.count - got)
+                guard n > 0 else { return }
+                got += n
+              }
+            }
+            guard got == 16 else { return feed.finish(throwing: n < 0 ? POSIXError(.init(rawValue: errno) ?? .EIO) : nil) }
+            feed.yield(msg.map { Int(UInt32(littleEndian: $0)) })
+          }
+        }
+        for try await f in frames {
           if let cg = fb.image(width: f[0], height: f[1], offset: f[3] * fb.size / 2) {
             await onFrame(cg, Rotation(rawValue: f[2]) ?? .portrait)
           }
