@@ -1,8 +1,8 @@
 diff --git a/host/frame_buffer.cpp b/host/frame_buffer.cpp
-index 473fcea..56ddf49 100644
+index b497d6c0..fab77dc1 100644
 --- a/host/frame_buffer.cpp
 +++ b/host/frame_buffer.cpp
-@@ -4576,6 +4576,12 @@ void FrameBuffer::readColorBuffer(HandleType p_colorbuffer, int x, int y, int wi
+@@ -4798,6 +4798,12 @@ void FrameBuffer::readColorBuffer(HandleType p_colorbuffer, int x, int y, int wi
      mImpl->readColorBuffer(p_colorbuffer, x, y, width, height, pixelsFormat, pixels, outPixelsSize);
  }
  
@@ -16,10 +16,10 @@ index 473fcea..56ddf49 100644
                                              int height, GLenum pixelsFormat, GLenum pixelsType,
                                              void* pixels, uint64_t pixelsSize) {
 diff --git a/host/frame_buffer.h b/host/frame_buffer.h
-index adb25ce..019164f 100644
+index f7203627..2c089821 100644
 --- a/host/frame_buffer.h
 +++ b/host/frame_buffer.h
-@@ -217,6 +217,9 @@ class FrameBuffer : public gfxstream::base::EventNotificationSupport<FrameBuffer
+@@ -218,6 +218,9 @@ class FrameBuffer : public gfxstream::base::EventNotificationSupport<FrameBuffer
      // |outPixelsSize| is the size of buffer
      void readColorBuffer(HandleType p_colorbuffer, int x, int y, int width, int height,
                           GfxstreamFormat pixelsFormat, void* pixels, uint64_t outPixelsSize);
@@ -30,7 +30,7 @@ index adb25ce..019164f 100644
                                     GLenum format, GLenum type, void* pixels,
                                     uint64_t outPixelsSize);
 diff --git a/host/include/gfxstream/virtio-gpu-gfxstream-renderer-unstable.h b/host/include/gfxstream/virtio-gpu-gfxstream-renderer-unstable.h
-index 5f5eae0..53a28b9 100644
+index 7d8d4314..37b21bf5 100644
 --- a/host/include/gfxstream/virtio-gpu-gfxstream-renderer-unstable.h
 +++ b/host/include/gfxstream/virtio-gpu-gfxstream-renderer-unstable.h
 @@ -61,6 +61,11 @@ VG_EXPORT void gfxstream_backend_setup_window(void* native_window_handle, int32_
@@ -46,10 +46,10 @@ index 5f5eae0..53a28b9 100644
  VG_EXPORT int stream_renderer_platform_destroy_shared_egl_context(void*);
  
 diff --git a/host/virtio_gpu_frontend.cpp b/host/virtio_gpu_frontend.cpp
-index 3b5eaaf..412c026 100644
+index f91f44ae..8f2714af 100644
 --- a/host/virtio_gpu_frontend.cpp
 +++ b/host/virtio_gpu_frontend.cpp
-@@ -623,6 +623,18 @@ int VirtioGpuFrontend::transferWriteIov(int resId, uint64_t offset, stream_rende
+@@ -566,6 +566,18 @@ int VirtioGpuFrontend::transferWriteIov(int resId, uint64_t offset, stream_rende
      return resource.TransferWrite(offset, box, AsVecOption(iov, iovec_cnt));
  }
  
@@ -69,10 +69,10 @@ index 3b5eaaf..412c026 100644
      switch (set) {
          case VIRTGPU_CAPSET_GFXSTREAM_VULKAN:
 diff --git a/host/virtio_gpu_frontend.h b/host/virtio_gpu_frontend.h
-index 0431560..6d6b2bc 100644
+index bd99c3f9..5455e858 100644
 --- a/host/virtio_gpu_frontend.h
 +++ b/host/virtio_gpu_frontend.h
-@@ -77,6 +77,7 @@ class VirtioGpuFrontend {
+@@ -75,6 +75,7 @@ class VirtioGpuFrontend {
                          int iovec_cnt);
      int transferWriteIov(int resId, uint64_t offset, stream_renderer_box* box, struct iovec* iov,
                           int iovec_cnt);
@@ -81,10 +81,10 @@ index 0431560..6d6b2bc 100644
      void getCapset(uint32_t set, uint32_t* max_size);
      void fillCaps(uint32_t set, void* caps);
 diff --git a/host/virtio_gpu_gfxstream_renderer.cpp b/host/virtio_gpu_gfxstream_renderer.cpp
-index f974dad..295f9bf 100644
+index d6315ea3..d1932224 100644
 --- a/host/virtio_gpu_gfxstream_renderer.cpp
 +++ b/host/virtio_gpu_gfxstream_renderer.cpp
-@@ -443,6 +443,14 @@ VG_EXPORT int stream_renderer_resource_get_info(int res_handle,
+@@ -449,6 +449,14 @@ VG_EXPORT int stream_renderer_resource_get_info(int res_handle,
      return sFrontend()->getResourceInfo(res_handle, info);
  }
  
@@ -100,7 +100,7 @@ index f974dad..295f9bf 100644
      GFXSTREAM_TRACE_EVENT(GFXSTREAM_TRACE_STREAM_RENDERER_CATEGORY, "stream_renderer_flush()");
  
 diff --git a/host/virtio_gpu_resource.h b/host/virtio_gpu_resource.h
-index 5276ffd..61c86c3 100644
+index c209bd2f..a4734785 100644
 --- a/host/virtio_gpu_resource.h
 +++ b/host/virtio_gpu_resource.h
 @@ -70,6 +70,14 @@ class VirtioGpuResource {
@@ -119,7 +119,7 @@ index 5276ffd..61c86c3 100644
      void DetachIov();
  
 diff --git a/host/vulkan/vk_common_operations.cpp b/host/vulkan/vk_common_operations.cpp
-index 50de4f4..ccaf185 100644
+index 7ecd8ea3..92da6e79 100644
 --- a/host/vulkan/vk_common_operations.cpp
 +++ b/host/vulkan/vk_common_operations.cpp
 @@ -426,6 +426,13 @@ void VkEmulation::appendExternalMemoryModeDeviceExtensions(
@@ -135,8 +135,8 @@ index 50de4f4..ccaf185 100644
 +#endif
  }
  
- // Return true if format requires sampler YCBCR conversion for VK_IMAGE_ASPECT_COLOR_BIT image
-@@ -1790,6 +1797,7 @@ VkEmulation::~VkEmulation() {
+ static VkImageUsageFlags getSupportedImageUsageFlags(const VkFormatProperties& formatProperties,
+@@ -1788,6 +1795,7 @@ VkEmulation::~VkEmulation() {
          }
  
          mStaging.destroy(mDvk, mDevice);
@@ -144,7 +144,7 @@ index 50de4f4..ccaf185 100644
  
          mDvk->vkDestroyFence(mDevice, mCommandBufferFence, nullptr);
          mDvk->vkFreeCommandBuffers(mDevice, mCommandPool, 1, &mCommandBuffer);
-@@ -3492,9 +3500,91 @@ bool VkEmulation::readColorBufferToBytes(uint32_t colorBufferHandle, uint32_t x,
+@@ -3521,9 +3529,91 @@ bool VkEmulation::readColorBufferToBytes(uint32_t colorBufferHandle, uint32_t x,
      return readColorBufferToBytesLocked(colorBufferHandle, x, y, w, h, outPixels, outPixelsSize);
  }
  
@@ -237,7 +237,7 @@ index 50de4f4..ccaf185 100644
      auto vk = mDvk;
  
      auto colorBufferInfo = gfxstream::base::find(mColorBuffers, colorBufferHandle);
-@@ -3525,10 +3615,13 @@ bool VkEmulation::readColorBufferToBytesLocked(uint32_t colorBufferHandle, uint3
+@@ -3554,10 +3644,13 @@ bool VkEmulation::readColorBufferToBytesLocked(uint32_t colorBufferHandle, uint3
          return false;
      }
      VkDeviceSize bufferCopySize = transferInfo.stagingBufferCopySize;
@@ -254,7 +254,7 @@ index 50de4f4..ccaf185 100644
          GFXSTREAM_ERROR("Failed to read ColorBuffer:%d, transfer size %" PRIu64
                          " too large for staging buffer size:%" PRIu64 ".",
                          colorBufferHandle, bufferCopySize, stagingBufferSize);
-@@ -3587,7 +3680,7 @@ bool VkEmulation::readColorBufferToBytesLocked(uint32_t colorBufferHandle, uint3
+@@ -3616,7 +3709,7 @@ bool VkEmulation::readColorBufferToBytesLocked(uint32_t colorBufferHandle, uint3
                               &toTransferSrcImageBarrier);
  
      vk->vkCmdCopyImageToBuffer(mCommandBuffer, colorBufferInfo->image,
@@ -263,7 +263,7 @@ index 50de4f4..ccaf185 100644
                                 bufferImageCopies.size(), bufferImageCopies.data());
  
      // Change back to original layout
-@@ -3657,6 +3750,10 @@ bool VkEmulation::readColorBufferToBytesLocked(uint32_t colorBufferHandle, uint3
+@@ -3686,6 +3779,10 @@ bool VkEmulation::readColorBufferToBytesLocked(uint32_t colorBufferHandle, uint3
  
      VK_CHECK(vk->vkResetFences(mDevice, 1, &mCommandBufferFence));
  
@@ -275,10 +275,10 @@ index 50de4f4..ccaf185 100644
          // Invalidate host cache lines to ensure the subsequent readback
          // will see the latest writes made by the GPU.
 diff --git a/host/vulkan/vk_common_operations.h b/host/vulkan/vk_common_operations.h
-index 6b60ac1..dc8fd1b 100644
+index 65e749e0..54c1fb7f 100644
 --- a/host/vulkan/vk_common_operations.h
 +++ b/host/vulkan/vk_common_operations.h
-@@ -436,6 +436,11 @@ class VkEmulation {
+@@ -438,6 +438,11 @@ class VkEmulation {
      bool readColorBufferToBytes(uint32_t colorBufferHandle, std::vector<uint8_t>* bytes);
      bool readColorBufferToBytes(uint32_t colorBufferHandle, uint32_t x, uint32_t y, uint32_t w,
                                  uint32_t h, void* outPixels, uint64_t outPixelsSize);
@@ -290,7 +290,7 @@ index 6b60ac1..dc8fd1b 100644
      bool readColorBufferPixelsScaled(uint32_t colorBufferHandle, int pixelsWidth, int pixelsHeight,
                                       GFXSTREAM_ROTATION pixelsRotation, const Rect& rect,
                                       GfxstreamFormat pixelsFormat, void* outPixels,
-@@ -597,9 +602,11 @@ class VkEmulation {
+@@ -589,9 +594,11 @@ class VkEmulation {
  
      bool colorBufferNeedsUpdateBetweenGlAndVk(const VkEmulation::ColorBufferInfo& colorBufferInfo);
  
@@ -303,7 +303,7 @@ index 6b60ac1..dc8fd1b 100644
  
      bool updateColorBufferFromBytesLocked(uint32_t colorBufferHandle, uint32_t x, uint32_t y,
                                            uint32_t w, uint32_t h, const void* pixels,
-@@ -742,6 +749,15 @@ class VkEmulation {
+@@ -734,6 +741,15 @@ class VkEmulation {
      // Staging buffer to perform reads and updates on color buffers.
      StagingBuffer mStaging GUARDED_BY(mMutex);
  

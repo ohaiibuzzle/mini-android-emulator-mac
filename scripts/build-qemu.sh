@@ -1,5 +1,5 @@
 #!/bin/sh
-# Builds Mini's QEMU engine from source into third_party/install: the gfxstream host (macOS work from google/gfxstream#168),
+# Builds Mini's QEMU engine from source into third_party/install: the gfxstream host (upstream, with the macOS work merged in google/gfxstream#168),
 # rutabaga_gfx's C FFI and upstream QEMU, each with patches/<tree>/*.patch. No Google prebuilt binaries.
 # Needs: brew install meson ninja rust pkg-config glib pixman libslirp vulkan-loader. bundle.sh copies the result into Mini.app.
 set -eu
@@ -17,7 +17,7 @@ fetch() {
   done
 }
 
-fetch gfxstream https://github.com/utzcoz/gfxstream.git e9eed53d
+fetch gfxstream https://github.com/google/gfxstream.git d8399873
 fetch rutabaga_gfx https://github.com/magma-gpu/rutabaga_gfx.git 60603af
 fetch qemu https://gitlab.com/qemu-project/qemu.git v11.1.2
 
