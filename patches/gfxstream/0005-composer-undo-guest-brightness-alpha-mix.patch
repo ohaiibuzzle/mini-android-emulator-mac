@@ -1,0 +1,41 @@
+diff --git a/host/common/hwc2.cpp b/host/common/hwc2.cpp
+index c4154860..60d582c2 100644
+--- a/host/common/hwc2.cpp
++++ b/host/common/hwc2.cpp
+@@ -14,15 +14,26 @@
+ 
+ #include "gfxstream/host/hwc2.h"
+ 
++#include <algorithm>
++
+ namespace gfxstream {
+ namespace host {
+ 
++// Mini: the guest's HWC3 (goldfish-opengl e0d4777, Android 16+) sends alpha = planeAlpha/2 + brightness/2, so a
++// faded-out layer arrives half opaque (e.g. the back-to-home scrim flashes at 50% black). Undo it.
++// shortcut: assumes brightness 1 (SDR layers dim below 1 only while HDR content is on screen) and an Android 16+
++// vendor, which every Mini guest has (API 37's); revisit if Mini ever boots an older vendor.
++static ComposeLayer FromGuestLayer(ComposeLayer layer) {
++    layer.alpha = std::clamp(2.0f * layer.alpha - 1.0f, 0.0f, 1.0f);
++    return layer;
++}
++
+ std::unique_ptr<FlatComposeRequest> ToFlatComposeRequest(const ComposeDevice* composeRequest) {
+     auto flatComposeRequest = std::make_unique<FlatComposeRequest>();
+     flatComposeRequest->displayId = 0;
+     flatComposeRequest->targetHandle = composeRequest->targetHandle;
+     for (uint32_t i = 0; i < composeRequest->numLayers; i++) {
+-        flatComposeRequest->layers.emplace_back(composeRequest->layer[i]);
++        flatComposeRequest->layers.emplace_back(FromGuestLayer(composeRequest->layer[i]));
+     }
+     return flatComposeRequest;
+ }
+@@ -32,7 +43,7 @@ std::unique_ptr<FlatComposeRequest> ToFlatComposeRequest(const ComposeDevice_v2*
+     flatComposeRequest->displayId = composeRequest->displayId;
+     flatComposeRequest->targetHandle = composeRequest->targetHandle;
+     for (uint32_t i = 0; i < composeRequest->numLayers; i++) {
+-        flatComposeRequest->layers.emplace_back(composeRequest->layer[i]);
++        flatComposeRequest->layers.emplace_back(FromGuestLayer(composeRequest->layer[i]));
+     }
+     return flatComposeRequest;
+ }
