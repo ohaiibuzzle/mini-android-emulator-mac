@@ -1,0 +1,17 @@
+diff --git a/MoltenVK/MoltenVK/GPUObjects/MVKDevice.mm b/MoltenVK/MoltenVK/GPUObjects/MVKDevice.mm
+index 9772757..f4e1418 100644
+--- a/MoltenVK/MoltenVK/GPUObjects/MVKDevice.mm
++++ b/MoltenVK/MoltenVK/GPUObjects/MVKDevice.mm
+@@ -3389,9 +3389,10 @@ void MVKPhysicalDevice::initMemoryProperties() {
+ 	}
+ #endif
+ 
+-	// Memoryless storage
++	// Memoryless storage. Mini: not offered. MoltenVK ends a Metal render pass mid-subpass to run compute (triangle-fan and
++	// multiview index conversion, tessellation), and a memoryless attachment can't be reloaded after that, so its contents are lost.
+ 	uint32_t memlessBit = 0;
+-	if (supportsMTLGPUFamily(Apple1)) {
++	if (false && supportsMTLGPUFamily(Apple1)) {
+ 		memlessBit = 1 << typeIdx;
+ 		setMemoryType(typeIdx, mainHeapIdx, MVK_VK_MEMORY_TYPE_METAL_MEMORYLESS);
+ 		typeIdx++;
